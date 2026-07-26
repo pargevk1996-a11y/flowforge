@@ -43,15 +43,24 @@ class Engine:
         self._registry = registry
         self._clock = clock
 
-    async def start(
+    async def create_run(
         self, run_id: str, workflow: str | WorkflowDef[Any, Any], workflow_input: Any
-    ) -> RunResult:
+    ) -> WorkflowDef[Any, Any]:
+        """Seed a run (append ``WORKFLOW_STARTED``) without driving it. Used by
+        the worker path, which enqueues the run for a worker to drive."""
         wf = self._resolve(workflow)
         payload = {
             "input": TypeAdapter(wf.input_type).dump_python(workflow_input, mode="json")
         }
         started = Event(seq=0, type=EventType.WORKFLOW_STARTED, name=wf.name, payload=payload)
         await self._store.append(run_id, [started], expected_version=0)
+        return wf
+
+    async def start(
+        self, run_id: str, workflow: str | WorkflowDef[Any, Any], workflow_input: Any
+    ) -> RunResult:
+        """Seed and drive a run inline (convenient for tests and simple embeds)."""
+        await self.create_run(run_id, workflow, workflow_input)
         return await self.drive(run_id)
 
     async def drive(self, run_id: str) -> RunResult:

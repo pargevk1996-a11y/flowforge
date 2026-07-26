@@ -75,8 +75,8 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 |---|---|
 | Event-sourced core, replay, saga, suspend/resume | ✅ done |
 | Typed `LLMStep[In, Out]` — structured output + schema-violation retry into the prompt + cost tracking | ✅ done |
+| Durable worker loop + priority queue + distributed locks (in-memory + Redis adapters) | ✅ done |
 | Postgres event store (`persistence/`, schema in `0001_init.sql`) | 🔜 next |
-| Durable worker loop + Redis priority queue + distributed locks | 🔜 next |
 | Timer wheel (durable `sleep`/timeout on Postgres) | 🔜 |
 | Per-tenant cost budgets (persist `cost_ledger`, cancel on exceed) & per-provider rate limits | 🔜 |
 | Triggers (HTTP / webhook / cron / email) | 🔜 |

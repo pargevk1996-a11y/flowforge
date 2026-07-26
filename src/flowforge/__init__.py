@@ -14,6 +14,15 @@ from flowforge.core.errors import (
 )
 from flowforge.core.event_store import EventStore, InMemoryEventStore
 from flowforge.core.retry import RetryPolicy
+from flowforge.queue import (
+    InMemoryLockManager,
+    InMemoryTaskQueue,
+    LockManager,
+    QueueItem,
+    TaskQueue,
+    Worker,
+    submit,
+)
 from flowforge.workflow.context import WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef, define
 
@@ -24,17 +33,24 @@ __all__ = [
     "EventStore",
     "FlowforgeError",
     "InMemoryEventStore",
+    "InMemoryLockManager",
+    "InMemoryTaskQueue",
+    "LockManager",
     "NonRetryableError",
+    "QueueItem",
     "Registry",
     "RetryPolicy",
     "RetryableError",
     "RunResult",
     "RunStatus",
     "Suspended",
+    "TaskQueue",
+    "Worker",
     "WorkflowContext",
     "WorkflowDef",
     "WorkflowNotFoundError",
     "define",
+    "submit",
 ]
 
 __version__ = "0.1.0"
