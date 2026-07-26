@@ -55,8 +55,10 @@ async def invoice_to_payment(ctx: WorkflowContext, inp: Invoice) -> Payment:
 
 The **durable execution core is implemented and tested**: event-sourced state,
 deterministic replay, exactly-once side effects, crash/resume, durable
-`sleep`, human-in-the-loop signals, typed retry, and saga compensations — all
-green under `mypy --strict` with an in-memory event store.
+`sleep`, human-in-the-loop signals, typed retry, and saga compensations — plus a
+**typed `LLMStep`** with structured output, schema-violation retry that feeds the
+error back into the prompt, and per-call cost tracking. All green under
+`mypy --strict` with an in-memory event store and an in-process LLM client.
 
 ```bash
 make install   # venv + editable install with dev extras
@@ -72,11 +74,11 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | Area | State |
 |---|---|
 | Event-sourced core, replay, saga, suspend/resume | ✅ done |
+| Typed `LLMStep[In, Out]` — structured output + schema-violation retry into the prompt + cost tracking | ✅ done |
 | Postgres event store (`persistence/`, schema in `0001_init.sql`) | 🔜 next |
 | Durable worker loop + Redis priority queue + distributed locks | 🔜 next |
 | Timer wheel (durable `sleep`/timeout on Postgres) | 🔜 |
-| Typed `LLMStep[In, Out]` — structured output + schema-violation retry into the prompt | 🔜 |
-| Per-tenant cost budgets & per-provider rate limits | 🔜 |
+| Per-tenant cost budgets (persist `cost_ledger`, cancel on exceed) & per-provider rate limits | 🔜 |
 | Triggers (HTTP / webhook / cron / email) | 🔜 |
 | Sub-workflows, fan-out/fan-in with bounded concurrency | 🔜 |
 | FastAPI control plane + React/Vite timeline & replay debugger | 🔜 |

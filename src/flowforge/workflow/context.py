@@ -74,25 +74,31 @@ class WorkflowContext:
         name: str | None = None,
         retry: RetryPolicy | None = None,
         compensate: Callable[[], Awaitable[None]] | None = None,
+        result_type: type[T] | None = None,
     ) -> T:
         """Run a side-effecting step durably, with typed retry and an optional
-        compensation for the saga rollback."""
+        compensation for the saga rollback.
+
+        ``result_type`` overrides the return-annotation used to (de)serialize the
+        result through the event log — needed when the callable's return type is
+        generic (e.g. an :class:`~flowforge.llm.step.LLMStep`)."""
         cs = self._next_command_seq()
         label = name or fn.__name__
+        adapter = self._adapter(fn, result_type)
 
         completed = self._find(cs, EventType.ACTIVITY_COMPLETED)
         if completed is not None:
             # Already done on a previous drive: return the recorded result and
             # re-register the compensation so the saga list is complete on replay.
             self._register_compensation(label, compensate)
-            return cast(T, _return_adapter(fn).validate_python(completed.payload["result"]))
+            return cast(T, adapter.validate_python(completed.payload["result"]))
 
         failed = self._find(cs, EventType.ACTIVITY_FAILED)
         if failed is not None:
             raise ActivityFailedError(label, str(failed.payload.get("error")))
 
         await self._append(EventType.ACTIVITY_SCHEDULED, command_seq=cs, name=label)
-        return await self._execute(fn, args, cs, label, retry or RetryPolicy(), compensate)
+        return await self._execute(fn, args, cs, label, retry or RetryPolicy(), compensate, adapter)
 
     async def sleep(self, seconds: float, *, name: str = "sleep") -> None:
         """Durably pause the run. The process is freed; a timer re-enqueues it."""
@@ -130,6 +136,7 @@ class WorkflowContext:
         label: str,
         retry: RetryPolicy,
         compensate: Callable[[], Awaitable[None]] | None,
+        adapter: TypeAdapter[Any],
     ) -> T:
         last_error: Exception | None = None
         for attempt in range(1, retry.max_attempts + 1):
@@ -148,7 +155,7 @@ class WorkflowContext:
                     EventType.ACTIVITY_COMPLETED,
                     command_seq=cs,
                     name=label,
-                    payload={"result": _return_adapter(fn).dump_python(result, mode="json")},
+                    payload={"result": adapter.dump_python(result, mode="json")},
                 )
                 self._register_compensation(label, compensate)
                 return result
@@ -197,6 +204,12 @@ class WorkflowContext:
             if event.type == type:
                 return event
         return None
+
+    @staticmethod
+    def _adapter(fn: Callable[..., Any], result_type: type[Any] | None) -> TypeAdapter[Any]:
+        if result_type is not None:
+            return TypeAdapter(result_type)
+        return _return_adapter(fn)
 
     def _register_compensation(
         self, name: str, compensate: Callable[[], Awaitable[None]] | None
