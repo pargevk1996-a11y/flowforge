@@ -1,10 +1,11 @@
 """Assembles the runtime pieces a control plane serves over: engine, store,
-registry, queue, worker, and (optionally) a timer wheel."""
+registry, queue, worker, a budget guard, and (optionally) a timer wheel."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from flowforge.core.budget import Budget, BudgetGuard, CostLedger
 from flowforge.core.engine import Engine
 from flowforge.core.event_store import EventStore
 from flowforge.core.timers import TimerStore
@@ -23,6 +24,7 @@ class ControlPlane:
     queue: TaskQueue
     worker: Worker
     wheel: TimerWheel | None = None
+    budget: BudgetGuard | None = None
 
 
 def build_control_plane(
@@ -32,10 +34,20 @@ def build_control_plane(
     timers: TimerStore | None = None,
     queue: TaskQueue | None = None,
     locks: LockManager | None = None,
+    ledger: CostLedger | None = None,
+    budget: Budget | None = None,
+    tenant_budgets: dict[str, Budget] | None = None,
 ) -> ControlPlane:
+    """Wire the runtime. A ``ledger`` turns on cost accounting; a ``budget`` (or
+    ``tenant_budgets``) additionally turns on enforcement."""
     queue = queue or InMemoryTaskQueue()
     locks = locks or InMemoryLockManager()
-    engine = Engine(store, registry, timers=timers)
+    guard = (
+        BudgetGuard(ledger, default=budget, per_tenant=tenant_budgets)
+        if ledger is not None
+        else None
+    )
+    engine = Engine(store, registry, timers=timers, budget=guard)
     worker = Worker(engine, queue, locks)
     wheel = TimerWheel(engine, timers, queue) if timers is not None else None
     return ControlPlane(
@@ -45,4 +57,5 @@ def build_control_plane(
         queue=queue,
         worker=worker,
         wheel=wheel,
+        budget=guard,
     )

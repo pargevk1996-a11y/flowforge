@@ -15,11 +15,12 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
+from flowforge.core.budget import BudgetGuard
 from flowforge.core.errors import ActivityFailedError, Suspended
 from flowforge.core.event_store import EventStore
 from flowforge.core.events import TERMINAL_EVENTS, Event, EventType
 from flowforge.core.timers import TimerStore
-from flowforge.workflow.context import Clock, WorkflowContext
+from flowforge.workflow.context import DEFAULT_TENANT, Clock, WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef
 
 
@@ -44,30 +45,47 @@ class Engine:
         registry: Registry,
         clock: Clock | None = None,
         timers: TimerStore | None = None,
+        budget: BudgetGuard | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
         self._clock = clock
         self._timers = timers
+        self._budget = budget
 
     async def create_run(
-        self, run_id: str, workflow: str | WorkflowDef[Any, Any], workflow_input: Any
+        self,
+        run_id: str,
+        workflow: str | WorkflowDef[Any, Any],
+        workflow_input: Any,
+        *,
+        tenant: str = DEFAULT_TENANT,
     ) -> WorkflowDef[Any, Any]:
         """Seed a run (append ``WORKFLOW_STARTED``) without driving it. Used by
-        the worker path, which enqueues the run for a worker to drive."""
+        the worker path, which enqueues the run for a worker to drive.
+
+        The tenant is written into the first event because it decides who is
+        billed for the run's LLM calls — it must survive a crash and be identical
+        on every replay, which only the log guarantees."""
         wf = self._resolve(workflow)
         payload = {
-            "input": TypeAdapter(wf.input_type).dump_python(workflow_input, mode="json")
+            "input": TypeAdapter(wf.input_type).dump_python(workflow_input, mode="json"),
+            "tenant": tenant,
         }
         started = Event(seq=0, type=EventType.WORKFLOW_STARTED, name=wf.name, payload=payload)
         await self._store.append(run_id, [started], expected_version=0)
         return wf
 
     async def start(
-        self, run_id: str, workflow: str | WorkflowDef[Any, Any], workflow_input: Any
+        self,
+        run_id: str,
+        workflow: str | WorkflowDef[Any, Any],
+        workflow_input: Any,
+        *,
+        tenant: str = DEFAULT_TENANT,
     ) -> RunResult:
         """Seed and drive a run inline (convenient for tests and simple embeds)."""
-        await self.create_run(run_id, workflow, workflow_input)
+        await self.create_run(run_id, workflow, workflow_input, tenant=tenant)
         return await self.drive(run_id)
 
     async def drive(self, run_id: str) -> RunResult:
@@ -84,7 +102,12 @@ class Engine:
             history[0].payload["input"]
         )
         ctx = WorkflowContext(
-            run_id, history, self._store, clock=self._clock, timers=self._timers
+            run_id,
+            history,
+            self._store,
+            clock=self._clock,
+            timers=self._timers,
+            budget=self._budget,
         )
 
         try:

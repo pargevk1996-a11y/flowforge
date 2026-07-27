@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+from flowforge.core.budget import (
+    Budget,
+    BudgetGuard,
+    CostEntry,
+    CostLedger,
+    CostMeter,
+    InMemoryCostLedger,
+)
 from flowforge.core.engine import Engine, RunResult, RunStatus
 from flowforge.core.errors import (
     ActivityFailedError,
+    BudgetExceededError,
     ConcurrencyError,
     FlowforgeError,
     NonRetryableError,
+    RateLimitedError,
     RetryableError,
     Suspended,
     WorkflowNotFoundError,
@@ -30,11 +40,18 @@ from flowforge.workflow.definition import Registry, WorkflowDef, define
 
 __all__ = [
     "ActivityFailedError",
+    "Budget",
+    "BudgetExceededError",
+    "BudgetGuard",
     "ConcurrencyError",
+    "CostEntry",
+    "CostLedger",
+    "CostMeter",
     "DueTimer",
     "Engine",
     "EventStore",
     "FlowforgeError",
+    "InMemoryCostLedger",
     "InMemoryEventStore",
     "InMemoryLockManager",
     "InMemoryTaskQueue",
@@ -42,6 +59,7 @@ __all__ = [
     "LockManager",
     "NonRetryableError",
     "QueueItem",
+    "RateLimitedError",
     "Registry",
     "RetryPolicy",
     "RetryableError",

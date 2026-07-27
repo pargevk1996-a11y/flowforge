@@ -85,10 +85,15 @@ class PostgresEventStore:
                     f"run {run_id!r}: expected version {expected_version}, got {current}"
                 )
             if row is None:
+                # First append is WORKFLOW_STARTED, which carries the tenant the
+                # run's costs are billed to; project it onto the run row so cost
+                # reporting can join without replaying the log.
                 await conn.execute(
-                    "INSERT INTO workflow_runs (run_id, workflow_name) VALUES ($1, $2)",
+                    "INSERT INTO workflow_runs (run_id, workflow_name, tenant_id) "
+                    "VALUES ($1, $2, $3)",
                     run_id,
                     events[0].name or "",
+                    str(events[0].payload.get("tenant") or "default"),
                 )
             await conn.executemany(
                 "INSERT INTO events "

@@ -10,10 +10,12 @@ from flowforge.llm.client import (
     ScriptedLLMClient,
 )
 from flowforge.llm.cost import CostTracker, ModelPrice, Pricing
+from flowforge.llm.limits import InMemoryRateLimiter, RateLimit, RateLimiter
 from flowforge.llm.step import LLMStep, SchemaViolationError
 
 __all__ = [
     "CostTracker",
+    "InMemoryRateLimiter",
     "LLMClient",
     "LLMMessage",
     "LLMResponse",
@@ -21,6 +23,8 @@ __all__ = [
     "LLMUsage",
     "ModelPrice",
     "Pricing",
+    "RateLimit",
+    "RateLimiter",
     "SchemaViolationError",
     "ScriptedLLMClient",
 ]

@@ -1,8 +1,9 @@
-"""Cost accounting for LLM steps — the basis for per-tenant budgets.
+"""Pricing for LLM steps — the numbers per-tenant budgets are enforced on.
 
-Every completion is priced from token usage and accumulated. Persisting this to
-the ``cost_ledger`` table and enforcing per-tenant ``$/day`` limits is the next
-brick; the tracker here already gives the numbers to enforce on.
+:class:`Pricing` turns token usage into dollars; :class:`CostTracker` is a
+process-local running total, useful for a single embed or a test assertion. The
+durable side — writing each charge to the ``cost_ledger`` and refusing calls once
+a tenant is over its limit — lives in :mod:`flowforge.core.budget`.
 """
 
 from __future__ import annotations

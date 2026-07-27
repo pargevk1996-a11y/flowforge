@@ -31,6 +31,23 @@ class ActivityFailedError(FlowforgeError):
         super().__init__(f"activity {activity!r} failed: {message}")
 
 
+class BudgetExceededError(NonRetryableError):
+    """The tenant's spend limit is exhausted; no further billable call is allowed.
+
+    Deliberately non-retryable: waiting and trying again inside the same run would
+    not make the money reappear. The run therefore fails through the normal saga
+    path, so whatever it already did is compensated rather than left half-done.
+    """
+
+
+class RateLimitedError(RetryableError):
+    """A provider's rate limit could not be satisfied within the allowed wait.
+
+    Retryable: the limiter refills over time, so the activity's retry policy is
+    exactly the right place to back off and try again.
+    """
+
+
 class ConcurrencyError(FlowforgeError):
     """Optimistic-concurrency violation while appending to the event log.
 

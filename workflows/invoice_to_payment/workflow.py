@@ -8,7 +8,7 @@ resolves by name.
 from __future__ import annotations
 
 from flowforge import Registry, WorkflowContext, WorkflowDef
-from flowforge.llm import CostTracker, LLMClient, LLMStep
+from flowforge.llm import CostTracker, LLMClient, LLMStep, Pricing, RateLimiter
 from workflows.invoice_to_payment.schemas import (
     CfoDecision,
     ExtractedInvoice,
@@ -33,6 +33,8 @@ def build_invoice_to_payment(
     model: str = "gpt-4o-mini",
     approval_threshold: float = 10_000.0,
     cost: CostTracker | None = None,
+    pricing: Pricing | None = None,
+    limiter: RateLimiter | None = None,
 ) -> WorkflowDef[InvoiceInput, PaymentResult]:
     extract = LLMStep(
         llm_client,
@@ -40,6 +42,8 @@ def build_invoice_to_payment(
         ExtractedInvoice,
         system=_EXTRACT_SYSTEM,
         cost=cost,
+        pricing=pricing,
+        limiter=limiter,
         name="extract_invoice",
     )
 
@@ -47,9 +51,9 @@ def build_invoice_to_payment(
         ctx: WorkflowContext, inp: InvoiceInput
     ) -> PaymentResult:
         text = await ctx.activity(services.ocr_pdf, inp.pdf_url, name="ocr_pdf")
-        invoice = await ctx.activity(
-            extract.run, text, name=extract.name, result_type=ExtractedInvoice
-        )
+        # ctx.llm, not ctx.activity: the step is billed to this run's tenant and
+        # refused outright once that tenant is out of budget.
+        invoice = await ctx.llm(extract, text)
         await ctx.activity(services.match_vendor, invoice.vendor, name="match_vendor")
 
         if invoice.amount > approval_threshold:

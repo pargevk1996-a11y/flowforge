@@ -5,19 +5,24 @@ schema, and on a violation feeds the exact error back into the conversation
 ("you returned X, but field Y must be an int") and tries again — up to a bound.
 This is ``Retry = typed``, not ``while True``.
 
-It is meant to be run through ``ctx.activity(step.run, content, result_type=...,
-name=...)`` so the *validated* result is recorded once in the event log: replay
-returns it without ever calling the model again, and the schema-retry cost is
-never paid twice.
+It is meant to be run through ``ctx.llm(step, content)`` so the *validated* result
+is recorded once in the event log: replay returns it without ever calling the
+model again, and the schema-retry cost is never paid twice. That path also hands
+the step a :class:`~flowforge.core.budget.CostMeter` bound to the run's tenant, so
+every provider call is checked against the tenant's budget before it is made and
+written to the cost ledger after — including the schema retries, which are real
+money and are billed as such.
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel, ValidationError
 
+from flowforge.core.budget import CostMeter
 from flowforge.core.errors import NonRetryableError
 from flowforge.llm.client import LLMClient, LLMMessage
 from flowforge.llm.cost import CostTracker, Pricing
+from flowforge.llm.limits import RateLimiter
 
 
 class SchemaViolationError(NonRetryableError):
@@ -47,6 +52,8 @@ class LLMStep[TOutput: BaseModel]:
         max_schema_retries: int = 3,
         pricing: Pricing | None = None,
         cost: CostTracker | None = None,
+        limiter: RateLimiter | None = None,
+        provider: str = "openai",
         name: str | None = None,
     ) -> None:
         self.client = client
@@ -56,9 +63,11 @@ class LLMStep[TOutput: BaseModel]:
         self.max_schema_retries = max_schema_retries
         self.pricing = pricing or Pricing()
         self.cost = cost
+        self.limiter = limiter
+        self.provider = provider
         self.name = name or f"llm:{output_type.__name__}"
 
-    async def run(self, user_content: str) -> TOutput:
+    async def run(self, user_content: str, /, *, meter: CostMeter | None = None) -> TOutput:
         schema = self.output_type.model_json_schema()
         messages: list[LLMMessage] = []
         if self.system is not None:
@@ -75,11 +84,21 @@ class LLMStep[TOutput: BaseModel]:
 
         last_error: ValidationError | None = None
         for _ in range(self.max_schema_retries):
+            # Gate every attempt, not just the first: a schema-retry loop is the
+            # most likely way for a run to spend money it no longer has.
+            if meter is not None:
+                await meter.check()
+            if self.limiter is not None:
+                await self.limiter.acquire(self.provider)
+
             response = await self.client.complete(
                 model=self.model, messages=messages, response_schema=schema
             )
+            usd = self.pricing.cost(self.model, response.usage)
             if self.cost is not None:
-                self.cost.add(self.model, self.pricing.cost(self.model, response.usage))
+                self.cost.add(self.model, usd)
+            if meter is not None:
+                await meter.charge(self.model, usd, provider=self.provider)
             try:
                 return self.output_type.model_validate_json(response.content)
             except ValidationError as exc:

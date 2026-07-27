@@ -27,7 +27,7 @@ async def submit(
     tenant: str = "default",
 ) -> None:
     """Seed a run and enqueue it for a worker to drive."""
-    await engine.create_run(run_id, workflow, workflow_input)
+    await engine.create_run(run_id, workflow, workflow_input, tenant=tenant)
     await queue.enqueue(run_id, priority=priority, tenant=tenant)
 
 

@@ -29,7 +29,7 @@ from the top:
 ```python
 async def invoice_to_payment(ctx: WorkflowContext, inp: Invoice) -> Payment:
     text   = await ctx.activity(ocr_pdf, inp.pdf_url)
-    fields = await ctx.activity(extract_fields, text)          # (LLM step: roadmap)
+    fields = await ctx.llm(extract_fields, text)               # typed, billed, capped
     if fields.amount > 10_000:
         decision = await ctx.wait_for_signal("cfo_approval", Approval)  # suspends
         if not decision.approved:
@@ -60,7 +60,9 @@ deterministic replay, exactly-once side effects, crash/resume, durable
 error back into the prompt, and per-call cost tracking. There is a durable worker
 loop with a priority queue and distributed locks (in-memory + Redis), and a
 **Postgres-backed event store** with a migration runner — the durability tests
-run against a real database. All green under `mypy --strict`.
+run against a real database. Every LLM call is billed to its tenant in a durable
+**cost ledger**, capped by a rolling per-tenant budget, and paced by a
+per-provider rate limit. All green under `mypy --strict`.
 
 ```bash
 # Run the Postgres integration tests against a throwaway database:
@@ -88,8 +90,8 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | Postgres event store + migration runner + `flowforge migrate` (tested against a real DB) | ✅ done |
 | Timer wheel — durable `sleep` wakes runs automatically (in-memory + Postgres, tested on a real DB) | ✅ done |
 | FastAPI control plane (start / status / timeline / signal) + **invoice-to-payment** reference workflow end-to-end | ✅ done |
-| Per-tenant cost budgets (persist `cost_ledger`, cancel on exceed) & per-provider rate limits | 🔜 next |
-| Triggers (HTTP / webhook / cron / email) | 🔜 |
+| Per-tenant cost budgets (durable `cost_ledger`, cancel + compensate on exceed) & per-provider rate limits | ✅ done |
+| Triggers (HTTP / webhook / cron / email) | 🔜 next |
 | Sub-workflows, fan-out/fan-in with bounded concurrency | 🔜 |
 | React/Vite timeline & replay debugger UI | 🔜 |
 
@@ -106,10 +108,57 @@ A thin FastAPI surface over the engine. Runs are enqueued and driven by a worker
 | `GET /runs/{id}` | status: `running` / `suspended` / `completed` / `failed` (+ result/error) |
 | `GET /runs/{id}/timeline` | the full event log — every prompt, LLM result, retry, wait, and cost |
 | `POST /runs/{id}/signals` | deliver a signal, e.g. the CFO approval that wakes a suspended run |
+| `GET /tenants/{tenant}/spend` | spend in the current window, the limit, and what is left |
+
+`POST /runs` answers `402` when the tenant's budget is already exhausted.
 
 The end-to-end tests in `tests/test_invoice_api.py` drive the real HTTP surface
 through auto-pay under the threshold, human approval above it, rejection, and saga
 rollback when a downstream step fails.
+
+---
+
+## Cost control
+
+An LLM step is the one part of a workflow that spends money while it runs, so it
+is the one part that has to be bounded. Two independent limits do that:
+
+**Per-tenant budgets.** Every provider call is priced from token usage and written
+to a durable `cost_ledger` row tagged with the run, the command, and the tenant.
+Before the *next* call, the guard sums that tenant's spend over a rolling window
+(`$/day` by default) and refuses once the limit is reached. The refusal is a
+`BudgetExceededError` — non-retryable, so the run fails through the ordinary saga
+path and **everything it already did is compensated**. A run cannot be left
+half-paid because the money ran out.
+
+The tenant is written into `WORKFLOW_STARTED`, not carried in from the queue, so
+who gets billed is identical on every replay and survives a crash. Schema retries
+inside a step are billed individually — they are real calls — and each one is
+gated, because a retry loop is the fastest way for a run to spend money it no
+longer has. Replay bills nothing: a recorded result never re-calls the model.
+
+**Per-provider rate limits.** A token bucket per provider paces outbound calls,
+waiting for capacity rather than failing. Only when the wait would exceed a
+ceiling does it raise `RateLimitedError` — which is *retryable*, so the activity's
+retry policy backs off and tries again.
+
+```python
+cp = build_control_plane(
+    store, registry,
+    ledger=PostgresCostLedger(pool),          # durable accounting
+    budget=Budget(limit_usd=50.0),            # $50/day per tenant
+    tenant_budgets={"whale": Budget(limit_usd=5_000.0)},
+)
+```
+
+Configure the defaults with `TENANT_BUDGET_USD_PER_DAY` and
+`LLM_RATE_LIMIT_PER_SECOND` (see `.env.example`). A ledger with no budget is pure
+accounting: it records everything and enforces nothing.
+
+`tests/test_budget.py` is the executable spec — billing to the right tenant, no
+double-billing on replay, cancel-and-compensate on exceed, tenant isolation, and
+a rolling window; `tests/test_postgres_ledger.py` proves the same against a real
+database.
 
 ---
 

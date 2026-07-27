@@ -1,9 +1,15 @@
 """FastAPI control plane.
 
 Thin HTTP surface over the engine: start a run, inspect its status, read its full
-event timeline, and deliver a signal (e.g. a human approval). Runs are enqueued
-for a worker to drive; with ``run_background=True`` the app runs its own worker and
-timer-wheel loops, so the whole thing is live behind ``flowforge api``.
+event timeline, deliver a signal (e.g. a human approval), and read a tenant's
+spend. Runs are enqueued for a worker to drive; with ``run_background=True`` the
+app runs its own worker and timer-wheel loops, so the whole thing is live behind
+``flowforge api``.
+
+Budgets are enforced twice, on purpose: admission control refuses to *start* a run
+for an exhausted tenant (``402``), and the meter inside each LLM step refuses to
+make a call once the budget runs out mid-run. The first is politeness, the second
+is the actual guarantee.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, TypeAdapter
 
 from flowforge.api.controlplane import ControlPlane
-from flowforge.core.errors import WorkflowNotFoundError
+from flowforge.core.errors import BudgetExceededError, WorkflowNotFoundError
 from flowforge.queue.worker import submit
 
 
@@ -55,6 +61,11 @@ def create_app(cp: ControlPlane, *, run_background: bool = False) -> FastAPI:
             wf = cp.registry.get(req.workflow)
         except WorkflowNotFoundError as exc:
             raise HTTPException(404, f"unknown workflow {req.workflow!r}") from exc
+        if cp.budget is not None:
+            try:
+                await cp.budget.ensure_within(req.tenant)
+            except BudgetExceededError as exc:
+                raise HTTPException(402, str(exc)) from exc
         workflow_input = TypeAdapter(wf.input_type).validate_python(req.input)
         run_id = uuid4().hex
         await submit(
@@ -91,5 +102,18 @@ def create_app(cp: ControlPlane, *, run_background: bool = False) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         await cp.queue.enqueue(run_id)
         return {"ok": True}
+
+    @app.get("/tenants/{tenant}/spend")
+    async def get_spend(tenant: str) -> dict[str, Any]:
+        if cp.budget is None:
+            raise HTTPException(404, "no cost ledger is configured")
+        budget = cp.budget.budget_for(tenant)
+        return {
+            "tenant": tenant,
+            "spent_usd": await cp.budget.spent(tenant),
+            "limit_usd": budget.limit_usd if budget is not None else None,
+            "remaining_usd": await cp.budget.remaining(tenant),
+            "window_seconds": budget.window.total_seconds() if budget is not None else None,
+        }
 
     return app

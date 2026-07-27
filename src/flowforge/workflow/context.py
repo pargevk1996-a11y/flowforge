@@ -15,10 +15,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any, cast, get_type_hints
 
 from pydantic import TypeAdapter
 
+from flowforge.core.budget import BudgetGuard, MeteredStep
 from flowforge.core.errors import ActivityFailedError, NonRetryableError, Suspended
 from flowforge.core.event_store import EventStore
 from flowforge.core.events import Event, EventType, utcnow
@@ -27,12 +29,26 @@ from flowforge.core.timers import TimerStore
 
 Clock = Callable[[], datetime]
 
+DEFAULT_TENANT = "default"
+
 
 def _return_adapter(fn: Callable[..., Any]) -> TypeAdapter[Any]:
     """Build a (de)serializer from a function's declared return type so activity
     results survive a round-trip through the JSON event log with their type."""
     hints = get_type_hints(fn)
     return TypeAdapter(hints.get("return", Any))
+
+
+def _tenant_of(history: list[Event]) -> str:
+    """The tenant recorded on ``WORKFLOW_STARTED``.
+
+    Tenancy is part of the run's identity, so it is written into the log at start
+    and read back on every replay — never carried in from the queue item, which
+    would make cost attribution depend on how the run happened to be delivered."""
+    if not history:
+        return DEFAULT_TENANT
+    tenant = history[0].payload.get("tenant")
+    return str(tenant) if tenant else DEFAULT_TENANT
 
 
 @dataclass
@@ -49,10 +65,13 @@ class WorkflowContext:
         store: EventStore,
         clock: Clock | None = None,
         timers: TimerStore | None = None,
+        budget: BudgetGuard | None = None,
     ) -> None:
         self.run_id = run_id
+        self.tenant = _tenant_of(history)
         self._store = store
         self._timers = timers
+        self._budget = budget
         self._history = list(history)
         self._version = len(history)
         self._command_seq = 0
@@ -102,6 +121,39 @@ class WorkflowContext:
 
         await self._append(EventType.ACTIVITY_SCHEDULED, command_seq=cs, name=label)
         return await self._execute(fn, args, cs, label, retry or RetryPolicy(), compensate, adapter)
+
+    async def llm[TOutput](
+        self,
+        step: MeteredStep[TOutput],
+        content: str,
+        *,
+        name: str | None = None,
+        retry: RetryPolicy | None = None,
+    ) -> TOutput:
+        """Run a typed LLM step as a durable activity, metered against the run's
+        tenant budget.
+
+        The step is a shared, run-agnostic object; what this adds is the binding to
+        *this* run — a meter carrying the tenant and command_seq, so every provider
+        call the step makes (including its schema retries) is checked against the
+        budget before and written to the cost ledger after. Exceeding the budget
+        raises :class:`~flowforge.core.errors.BudgetExceededError`, which is
+        non-retryable and therefore cancels the run through the saga path.
+
+        Like any activity, the *validated* result is recorded once: replay returns
+        it without calling the model — or spending a cent — again."""
+        meter = (
+            self._budget.meter(self.run_id, self.tenant, self._command_seq)
+            if self._budget is not None
+            else None
+        )
+        return await self.activity(
+            partial(step.run, meter=meter),
+            content,
+            name=name or step.name,
+            retry=retry,
+            result_type=step.output_type,
+        )
 
     async def sleep(self, seconds: float, *, name: str = "sleep") -> None:
         """Durably pause the run. The process is freed; a timer re-enqueues it."""
