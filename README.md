@@ -87,10 +87,29 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | Durable worker loop + priority queue + distributed locks (in-memory + Redis adapters) | ✅ done |
 | Postgres event store + migration runner + `flowforge migrate` (tested against a real DB) | ✅ done |
 | Timer wheel — durable `sleep` wakes runs automatically (in-memory + Postgres, tested on a real DB) | ✅ done |
-| Per-tenant cost budgets (persist `cost_ledger`, cancel on exceed) & per-provider rate limits | 🔜 |
+| FastAPI control plane (start / status / timeline / signal) + **invoice-to-payment** reference workflow end-to-end | ✅ done |
+| Per-tenant cost budgets (persist `cost_ledger`, cancel on exceed) & per-provider rate limits | 🔜 next |
 | Triggers (HTTP / webhook / cron / email) | 🔜 |
 | Sub-workflows, fan-out/fan-in with bounded concurrency | 🔜 |
-| FastAPI control plane + React/Vite timeline & replay debugger | 🔜 |
+| React/Vite timeline & replay debugger UI | 🔜 |
+
+---
+
+## Control plane
+
+A thin FastAPI surface over the engine. Runs are enqueued and driven by a worker;
+`invoice-to-payment` is registered and runnable end-to-end.
+
+| Method & path | Purpose |
+|---|---|
+| `POST /runs` | start a run: `{workflow, input, priority?, tenant?}` → `{run_id}` |
+| `GET /runs/{id}` | status: `running` / `suspended` / `completed` / `failed` (+ result/error) |
+| `GET /runs/{id}/timeline` | the full event log — every prompt, LLM result, retry, wait, and cost |
+| `POST /runs/{id}/signals` | deliver a signal, e.g. the CFO approval that wakes a suspended run |
+
+The end-to-end tests in `tests/test_invoice_api.py` drive the real HTTP surface
+through auto-pay under the threshold, human approval above it, rejection, and saga
+rollback when a downstream step fails.
 
 ---
 

@@ -24,6 +24,7 @@ from flowforge.workflow.definition import Registry, WorkflowDef
 
 
 class RunStatus(StrEnum):
+    RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     SUSPENDED = "suspended"
@@ -126,6 +127,11 @@ class Engine:
 
     async def send_signal(self, run_id: str, name: str, data: Any = None) -> RunResult:
         """Deliver an external signal (e.g. a human approval), then advance."""
+        await self.deliver_signal(run_id, name, data)
+        return await self.drive(run_id)
+
+    async def deliver_signal(self, run_id: str, name: str, data: Any = None) -> None:
+        """Record an external signal without driving the run (worker model)."""
         history = await self._store.load(run_id)
         cs = _pending_command(
             history, EventType.WAIT_STARTED, EventType.SIGNAL_RECEIVED, name=name
@@ -136,7 +142,21 @@ class Engine:
             run_id, history, EventType.SIGNAL_RECEIVED, command_seq=cs, name=name,
             payload={"data": data},
         )
-        return await self.drive(run_id)
+
+    async def describe(self, run_id: str) -> RunResult:
+        """Report a run's current status from the log, without driving it."""
+        history = await self._store.load(run_id)
+        if not history:
+            raise KeyError(run_id)
+        last = history[-1]
+        if last.type in TERMINAL_EVENTS:
+            return self._terminal_result(last)
+        waiting = _pending_command(
+            history, EventType.TIMER_STARTED, EventType.TIMER_FIRED
+        ) is not None or _pending_command(
+            history, EventType.WAIT_STARTED, EventType.SIGNAL_RECEIVED
+        ) is not None
+        return RunResult(RunStatus.SUSPENDED if waiting else RunStatus.RUNNING)
 
     # -- internals ----------------------------------------------------------
 
