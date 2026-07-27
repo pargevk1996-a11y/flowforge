@@ -23,6 +23,7 @@ from flowforge.core.errors import ActivityFailedError, NonRetryableError, Suspen
 from flowforge.core.event_store import EventStore
 from flowforge.core.events import Event, EventType, utcnow
 from flowforge.core.retry import RetryPolicy
+from flowforge.core.timers import TimerStore
 
 Clock = Callable[[], datetime]
 
@@ -47,9 +48,11 @@ class WorkflowContext:
         history: list[Event],
         store: EventStore,
         clock: Clock | None = None,
+        timers: TimerStore | None = None,
     ) -> None:
         self.run_id = run_id
         self._store = store
+        self._timers = timers
         self._history = list(history)
         self._version = len(history)
         self._command_seq = 0
@@ -107,6 +110,11 @@ class WorkflowContext:
             return
         if self._find(cs, EventType.TIMER_STARTED) is None:
             fire_at = self.now() + timedelta(seconds=seconds)
+            # Schedule before recording the event: if we crash between the two,
+            # replay re-schedules (a no-op on the timer store) — a wakeup is never
+            # lost, only ever duplicated harmlessly.
+            if self._timers is not None:
+                await self._timers.schedule(self.run_id, cs, fire_at)
             await self._append(
                 EventType.TIMER_STARTED,
                 command_seq=cs,

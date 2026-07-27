@@ -86,7 +86,7 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | Typed `LLMStep[In, Out]` — structured output + schema-violation retry into the prompt + cost tracking | ✅ done |
 | Durable worker loop + priority queue + distributed locks (in-memory + Redis adapters) | ✅ done |
 | Postgres event store + migration runner + `flowforge migrate` (tested against a real DB) | ✅ done |
-| Timer wheel (durable `sleep`/timeout on Postgres) | 🔜 next |
+| Timer wheel — durable `sleep` wakes runs automatically (in-memory + Postgres, tested on a real DB) | ✅ done |
 | Per-tenant cost budgets (persist `cost_ledger`, cancel on exceed) & per-provider rate limits | 🔜 |
 | Triggers (HTTP / webhook / cron / email) | 🔜 |
 | Sub-workflows, fan-out/fan-in with bounded concurrency | 🔜 |

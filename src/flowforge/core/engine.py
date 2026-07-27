@@ -18,6 +18,7 @@ from pydantic import TypeAdapter
 from flowforge.core.errors import ActivityFailedError, Suspended
 from flowforge.core.event_store import EventStore
 from flowforge.core.events import TERMINAL_EVENTS, Event, EventType
+from flowforge.core.timers import TimerStore
 from flowforge.workflow.context import Clock, WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef
 
@@ -37,11 +38,16 @@ class RunResult:
 
 class Engine:
     def __init__(
-        self, store: EventStore, registry: Registry, clock: Clock | None = None
+        self,
+        store: EventStore,
+        registry: Registry,
+        clock: Clock | None = None,
+        timers: TimerStore | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
         self._clock = clock
+        self._timers = timers
 
     async def create_run(
         self, run_id: str, workflow: str | WorkflowDef[Any, Any], workflow_input: Any
@@ -76,7 +82,9 @@ class Engine:
         workflow_input = TypeAdapter(wf.input_type).validate_python(
             history[0].payload["input"]
         )
-        ctx = WorkflowContext(run_id, history, self._store, clock=self._clock)
+        ctx = WorkflowContext(
+            run_id, history, self._store, clock=self._clock, timers=self._timers
+        )
 
         try:
             result = await wf.fn(ctx, workflow_input)
@@ -101,6 +109,20 @@ class Engine:
             raise ValueError(f"run {run_id!r} has no pending timer")
         await self._deliver(run_id, history, EventType.TIMER_FIRED, command_seq=cs)
         return await self.drive(run_id)
+
+    async def deliver_timer(self, run_id: str, command_seq: int) -> None:
+        """Record that a specific timer fired, without driving the run.
+
+        Used by the timer wheel, which enqueues the run for a worker to drive.
+        Idempotent: a timer already delivered is a no-op."""
+        history = await self._store.load(run_id)
+        already = any(
+            e.type == EventType.TIMER_FIRED and e.command_seq == command_seq
+            for e in history
+        )
+        if already:
+            return
+        await self._deliver(run_id, history, EventType.TIMER_FIRED, command_seq=command_seq)
 
     async def send_signal(self, run_id: str, name: str, data: Any = None) -> RunResult:
         """Deliver an external signal (e.g. a human approval), then advance."""
