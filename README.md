@@ -57,8 +57,17 @@ The **durable execution core is implemented and tested**: event-sourced state,
 deterministic replay, exactly-once side effects, crash/resume, durable
 `sleep`, human-in-the-loop signals, typed retry, and saga compensations — plus a
 **typed `LLMStep`** with structured output, schema-violation retry that feeds the
-error back into the prompt, and per-call cost tracking. All green under
-`mypy --strict` with an in-memory event store and an in-process LLM client.
+error back into the prompt, and per-call cost tracking. There is a durable worker
+loop with a priority queue and distributed locks (in-memory + Redis), and a
+**Postgres-backed event store** with a migration runner — the durability tests
+run against a real database. All green under `mypy --strict`.
+
+```bash
+# Run the Postgres integration tests against a throwaway database:
+docker run -d --name ff-pg -e POSTGRES_USER=flowforge -e POSTGRES_PASSWORD=flowforge \
+  -e POSTGRES_DB=flowforge -p 5432:5432 postgres:16
+DATABASE_URL=postgresql://flowforge:flowforge@localhost:5432/flowforge pytest
+```
 
 ```bash
 make install   # venv + editable install with dev extras
@@ -76,8 +85,8 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | Event-sourced core, replay, saga, suspend/resume | ✅ done |
 | Typed `LLMStep[In, Out]` — structured output + schema-violation retry into the prompt + cost tracking | ✅ done |
 | Durable worker loop + priority queue + distributed locks (in-memory + Redis adapters) | ✅ done |
-| Postgres event store (`persistence/`, schema in `0001_init.sql`) | 🔜 next |
-| Timer wheel (durable `sleep`/timeout on Postgres) | 🔜 |
+| Postgres event store + migration runner + `flowforge migrate` (tested against a real DB) | ✅ done |
+| Timer wheel (durable `sleep`/timeout on Postgres) | 🔜 next |
 | Per-tenant cost budgets (persist `cost_ledger`, cancel on exceed) & per-provider rate limits | 🔜 |
 | Triggers (HTTP / webhook / cron / email) | 🔜 |
 | Sub-workflows, fan-out/fan-in with bounded concurrency | 🔜 |
