@@ -5,23 +5,33 @@ new events. It returns when the run completes, fails (after running saga
 compensations), or suspends. ``start`` seeds a run; ``fire_timer`` and
 ``send_signal`` deliver the external events that wake a suspended run — each just
 appends the awaited event and re-drives.
+
+The engine is also the :class:`~flowforge.core.children.ChildLauncher`: it seeds
+child runs on a parent's behalf and, when a run finishes, reports the outcome back
+into its parent's log and re-enqueues it. A child is an ordinary run in every
+other respect, which is why fan-out needs no scheduler of its own.
 """
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter
 
 from flowforge.core.budget import BudgetGuard
-from flowforge.core.errors import ActivityFailedError, Suspended
+from flowforge.core.children import ChildOutcome, ParentRef
+from flowforge.core.errors import ActivityFailedError, ConcurrencyError, Suspended
 from flowforge.core.event_store import EventStore
 from flowforge.core.events import TERMINAL_EVENTS, Event, EventType
 from flowforge.core.timers import TimerStore
 from flowforge.workflow.context import DEFAULT_TENANT, Clock, WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef
+
+if TYPE_CHECKING:  # the queue package imports the engine, so keep the edge one-way
+    from flowforge.queue.base import TaskQueue
 
 
 class RunStatus(StrEnum):
@@ -46,12 +56,14 @@ class Engine:
         clock: Clock | None = None,
         timers: TimerStore | None = None,
         budget: BudgetGuard | None = None,
+        queue: TaskQueue | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
         self._clock = clock
         self._timers = timers
         self._budget = budget
+        self._queue = queue
 
     async def create_run(
         self,
@@ -60,6 +72,7 @@ class Engine:
         workflow_input: Any,
         *,
         tenant: str = DEFAULT_TENANT,
+        parent: ParentRef | None = None,
     ) -> WorkflowDef[Any, Any]:
         """Seed a run (append ``WORKFLOW_STARTED``) without driving it. Used by
         the worker path, which enqueues the run for a worker to drive.
@@ -67,11 +80,13 @@ class Engine:
         The tenant is written into the first event because it decides who is
         billed for the run's LLM calls — it must survive a crash and be identical
         on every replay, which only the log guarantees."""
-        wf = self._resolve(workflow)
-        payload = {
+        wf = self.resolve(workflow)
+        payload: dict[str, Any] = {
             "input": TypeAdapter(wf.input_type).dump_python(workflow_input, mode="json"),
             "tenant": tenant,
         }
+        if parent is not None:
+            payload["parent"] = parent.as_payload()
         started = Event(seq=0, type=EventType.WORKFLOW_STARTED, name=wf.name, payload=payload)
         await self._store.append(run_id, [started], expected_version=0)
         return wf
@@ -93,9 +108,9 @@ class Engine:
         if not history:
             raise ValueError(f"run {run_id!r} does not exist")
 
-        last = history[-1]
-        if last.type in TERMINAL_EVENTS:
-            return self._terminal_result(last)
+        terminal = _terminal_event(history)
+        if terminal is not None:
+            return self._terminal_result(terminal)
 
         wf = self._registry.get(history[0].name or "")
         workflow_input = TypeAdapter(wf.input_type).validate_python(
@@ -108,6 +123,7 @@ class Engine:
             clock=self._clock,
             timers=self._timers,
             budget=self._budget,
+            children=self,
         )
 
         try:
@@ -117,12 +133,12 @@ class Engine:
         except ActivityFailedError as exc:
             await ctx._run_compensations()
             await ctx._append(EventType.WORKFLOW_FAILED, payload={"error": str(exc)})
+            await self._notify_parent(history[0], run_id, error=str(exc))
             return RunResult(RunStatus.FAILED, error=str(exc))
 
-        await ctx._append(
-            EventType.WORKFLOW_COMPLETED,
-            payload={"result": TypeAdapter(wf.output_type).dump_python(result, mode="json")},
-        )
+        payload = TypeAdapter(wf.output_type).dump_python(result, mode="json")
+        await ctx._append(EventType.WORKFLOW_COMPLETED, payload={"result": payload})
+        await self._notify_parent(history[0], run_id, result=payload)
         return RunResult(RunStatus.COMPLETED, result=result)
 
     async def fire_timer(self, run_id: str) -> RunResult:
@@ -171,17 +187,117 @@ class Engine:
         history = await self._store.load(run_id)
         if not history:
             raise KeyError(run_id)
-        last = history[-1]
-        if last.type in TERMINAL_EVENTS:
-            return self._terminal_result(last)
-        waiting = _pending_command(
-            history, EventType.TIMER_STARTED, EventType.TIMER_FIRED
-        ) is not None or _pending_command(
-            history, EventType.WAIT_STARTED, EventType.SIGNAL_RECEIVED
-        ) is not None
+        terminal = _terminal_event(history)
+        if terminal is not None:
+            return self._terminal_result(terminal)
+        waiting = any(
+            _pending_command(history, started, *resolved) is not None
+            for started, resolved in (
+                (EventType.TIMER_STARTED, (EventType.TIMER_FIRED,)),
+                (EventType.WAIT_STARTED, (EventType.SIGNAL_RECEIVED,)),
+                (
+                    EventType.CHILD_STARTED,
+                    (EventType.CHILD_COMPLETED, EventType.CHILD_FAILED),
+                ),
+            )
+        )
         return RunResult(RunStatus.SUSPENDED if waiting else RunStatus.RUNNING)
 
+    # -- child workflows (the ChildLauncher protocol) ------------------------
+
+    def resolve(self, workflow: str | WorkflowDef[Any, Any]) -> WorkflowDef[Any, Any]:
+        if isinstance(workflow, str):
+            return self._registry.get(workflow)
+        return workflow
+
+    def child_run_id(self, parent_run_id: str, command_seq: int) -> str:
+        """Derived, not random: replaying the parent must recognise the child it
+        already started rather than start a second one."""
+        return f"{parent_run_id}.{command_seq}"
+
+    async def start_child(
+        self,
+        parent: ParentRef,
+        workflow: str | WorkflowDef[Any, Any],
+        workflow_input: Any,
+        *,
+        tenant: str = DEFAULT_TENANT,
+    ) -> str:
+        run_id = self.child_run_id(parent.run_id, parent.command_seq)
+        # A ConcurrencyError here means an earlier attempt seeded this exact run
+        # and crashed before recording CHILD_STARTED. It is the run we wanted.
+        with suppress(ConcurrencyError):
+            await self.create_run(
+                run_id, workflow, workflow_input, tenant=tenant, parent=parent
+            )
+        if self._queue is not None:
+            await self._queue.enqueue(run_id, tenant=tenant)
+        return run_id
+
+    async def child_outcome(self, run_id: str) -> ChildOutcome | None:
+        history = await self._store.load(run_id)
+        if not history:
+            return None
+        terminal = _terminal_event(history)
+        if terminal is None:
+            return None
+        completed = terminal.type == EventType.WORKFLOW_COMPLETED
+        return ChildOutcome(
+            run_id=run_id,
+            completed=completed,
+            result=terminal.payload.get("result") if completed else None,
+            error=None if completed else str(terminal.payload.get("error")),
+        )
+
     # -- internals ----------------------------------------------------------
+
+    async def _notify_parent(
+        self,
+        started: Event,
+        child_run_id: str,
+        *,
+        result: Any = None,
+        error: str | None = None,
+    ) -> None:
+        """Report a finished child into its parent's log and wake the parent.
+
+        Best-effort by design: if the parent has already terminated, or another
+        writer is mid-append, the notice is dropped — the parent reconciles from
+        the child's own log the next time it runs, so nothing is lost, only
+        delayed. The one gap left is a crash between this append and the enqueue
+        below, which leaves the parent holding the result but not queued to act
+        on it; a sweeper for stranded parents is the next brick."""
+        parent = ParentRef.from_payload(started.payload.get("parent"))
+        if parent is None:
+            return
+        history = await self._store.load(parent.run_id)
+        if not history or _terminal_event(history) is not None:
+            return
+        if any(
+            e.command_seq == parent.command_seq
+            and e.type in (EventType.CHILD_COMPLETED, EventType.CHILD_FAILED)
+            for e in history
+        ):
+            return
+
+        completed = error is None
+        event = Event(
+            seq=len(history),
+            type=EventType.CHILD_COMPLETED if completed else EventType.CHILD_FAILED,
+            command_seq=parent.command_seq,
+            name=started.name,
+            payload=(
+                {"child_run_id": child_run_id, "result": result}
+                if completed
+                else {"child_run_id": child_run_id, "error": error}
+            ),
+        )
+        try:
+            await self._store.append(parent.run_id, [event], expected_version=len(history))
+        except ConcurrencyError:
+            return
+        if self._queue is not None:
+            await self._queue.enqueue(parent.run_id)
 
     async def _deliver(
         self,
@@ -202,26 +318,28 @@ class Engine:
         )
         await self._store.append(run_id, [event], expected_version=len(history))
 
-    def _resolve(self, workflow: str | WorkflowDef[Any, Any]) -> WorkflowDef[Any, Any]:
-        if isinstance(workflow, str):
-            return self._registry.get(workflow)
-        return workflow
-
     def _terminal_result(self, event: Event) -> RunResult:
         if event.type == EventType.WORKFLOW_COMPLETED:
             return RunResult(RunStatus.COMPLETED, result=event.payload.get("result"))
         return RunResult(RunStatus.FAILED, error=event.payload.get("error"))
 
 
+def _terminal_event(history: list[Event]) -> Event | None:
+    """The run's terminal event, wherever it sits in the log.
+
+    Not ``history[-1]``: a child that finishes just after its parent did appends
+    to the parent's log, so the terminal event is not always last."""
+    return next((e for e in history if e.type in TERMINAL_EVENTS), None)
+
+
 def _pending_command(
     history: list[Event],
     started_type: EventType,
-    resolved_type: EventType,
-    *,
+    *resolved_types: EventType,
     name: str | None = None,
 ) -> int | None:
-    """The command_seq of the oldest ``started_type`` not yet ``resolved_type``."""
-    resolved = {e.command_seq for e in history if e.type == resolved_type}
+    """The command_seq of the oldest ``started_type`` not yet resolved."""
+    resolved = {e.command_seq for e in history if e.type in resolved_types}
     for event in history:
         if (
             event.type == started_type

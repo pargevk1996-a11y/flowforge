@@ -10,10 +10,12 @@ from flowforge.core.budget import (
     CostMeter,
     InMemoryCostLedger,
 )
+from flowforge.core.children import ChildLauncher, ChildOutcome, ParentRef
 from flowforge.core.engine import Engine, RunResult, RunStatus
 from flowforge.core.errors import (
     ActivityFailedError,
     BudgetExceededError,
+    ChildFailedError,
     ConcurrencyError,
     FlowforgeError,
     NonRetryableError,
@@ -43,6 +45,9 @@ __all__ = [
     "Budget",
     "BudgetExceededError",
     "BudgetGuard",
+    "ChildFailedError",
+    "ChildLauncher",
+    "ChildOutcome",
     "ConcurrencyError",
     "CostEntry",
     "CostLedger",
@@ -58,6 +63,7 @@ __all__ = [
     "InMemoryTimerStore",
     "LockManager",
     "NonRetryableError",
+    "ParentRef",
     "QueueItem",
     "RateLimitedError",
     "Registry",

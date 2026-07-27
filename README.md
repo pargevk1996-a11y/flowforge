@@ -63,8 +63,9 @@ loop with a priority queue and distributed locks (in-memory + Redis), and a
 run against a real database. Every LLM call is billed to its tenant in a durable
 **cost ledger**, capped by a rolling per-tenant budget, and paced by a
 per-provider rate limit. Runs start from **triggers** — webhook, inbound email, or
-cron — with exactly-once delivery claims over at-least-once sources. All green
-under `mypy --strict`.
+cron — with exactly-once delivery claims over at-least-once sources, and fan out
+over activities, LLM steps or **child runs** with a bound that survives a restart.
+All green under `mypy --strict`.
 
 ```bash
 # Run the Postgres integration tests against a throwaway database:
@@ -74,7 +75,7 @@ DATABASE_URL=postgresql://flowforge:flowforge@localhost:5432/flowforge pytest
 ```
 
 ```bash
-make install   # venv + editable install with dev extras
+make install   # venv + editable install with dev + serve extras
 make check     # ruff + mypy --strict + pytest
 ```
 
@@ -94,15 +95,15 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | FastAPI control plane (start / status / timeline / signal) + **invoice-to-payment** reference workflow end-to-end | ✅ done |
 | Per-tenant cost budgets (durable `cost_ledger`, cancel + compensate on exceed) & per-provider rate limits | ✅ done |
 | Triggers — HTTP/webhook, inbound email, cron — with exactly-once delivery claims | ✅ done |
-| Sub-workflows, fan-out/fan-in with bounded concurrency | 🔜 next |
-| React/Vite timeline & replay debugger UI | 🔜 |
+| Sub-workflows, fan-out/fan-in with bounded concurrency + **contract-review** reference workflow | ✅ done |
+| React/Vite timeline & replay debugger UI | 🔜 next |
 
 ---
 
 ## Control plane
 
 A thin FastAPI surface over the engine. Runs are enqueued and driven by a worker;
-`invoice-to-payment` is registered and runnable end-to-end.
+`invoice-to-payment` and `contract-review` are registered and runnable end-to-end.
 
 | Method & path | Purpose |
 |---|---|
@@ -120,6 +121,55 @@ already exhausted.
 The end-to-end tests in `tests/test_invoice_api.py` drive the real HTTP surface
 through auto-pay under the threshold, human approval above it, rejection, and saga
 rollback when a downstream step fails.
+
+---
+
+## Fan-out, fan-in, and sub-workflows
+
+One contract becomes forty clauses to judge; one batch becomes a thousand records
+to process. This is where an AI workflow either scales or falls over — forty
+simultaneous calls will trip a provider's rate limit, and can spend a tenant's
+daily budget in about a second.
+
+**Deterministic replay survives concurrency** because command numbers are handed
+out *up front, in item order*, before anything is awaited. Numbering is a property
+of the workflow's shape, not of who finished first. What varies between runs is
+only the order events land in the log, which nothing reads for meaning.
+
+| Primitive | Fans out over | Bound |
+|---|---|---|
+| `ctx.map(fn, items, concurrency=N)` | activities inside this run | a semaphore, N at once |
+| `ctx.map_llm(step, contents, concurrency=N)` | typed LLM steps, each metered and gated | as above, and the tenant's budget |
+| `ctx.children(workflow, inputs, concurrency=N)` | **child runs** — each its own log, id and worker | derived from the log, so it survives a restart |
+
+```python
+async def contract_review(ctx: WorkflowContext, inp: Contract) -> RiskReport:
+    paragraphs = await ctx.activity(fetch_paragraphs, inp.url)
+    findings   = await ctx.map_llm(risk_step, paragraphs, concurrency=4)  # fan out
+    high       = sum(1 for f in findings if f.level == "high")            # fan in
+    if high:
+        await ctx.wait_for_signal("legal_approval", LegalDecision)
+    ...
+```
+
+A failing item does **not** cancel its siblings: everything in flight is allowed
+to finish and record itself first — abandoning a side effect that already happened
+is how a fan-out loses money — and then the earliest failure, by item order, is
+raised. Compensations unwind in item order too, not in finish order.
+
+**Sub-workflows are real runs.** `ctx.child(workflow, input)` seeds an independent
+run and suspends the parent; the child reports back into the parent's log when it
+terminates and re-queues it. Child ids are derived (`{parent}.{command_seq}`), so
+replaying a parent recognises the child it already started instead of starting a
+second one, and a child that dies between finishing and reporting is reconciled —
+the parent asks the child's own log rather than waiting forever.
+
+That is what makes the bound on `ctx.children` *durable*: a thousand-item fan-out
+never has a thousand runs in flight, and the pacing is recomputed from the log on
+every drive rather than held in a semaphore that a restart would forget.
+
+`tests/test_fanout.py` and `tests/test_children.py` are the executable spec;
+`workflows/contract_review/` runs the whole thing end to end.
 
 ---
 
@@ -213,9 +263,12 @@ database.
 
 ---
 
-## Three reference workflows (target scenarios)
+## Three reference workflows
 
-### 1. Invoice-to-payment
+Two are implemented end to end (`workflows/`); the third is the target shape for
+support triage.
+
+### 1. Invoice-to-payment — implemented
 
 ```mermaid
 flowchart LR
@@ -230,7 +283,7 @@ flowchart LR
     G -. compensate .-> V[Void payment]
 ```
 
-### 2. Support ticket triage
+### 2. Support ticket triage — target scenario
 
 ```mermaid
 flowchart LR
@@ -246,7 +299,7 @@ flowchart LR
     I -- no --> J[Follow-up]
 ```
 
-### 3. Contract review pipeline
+### 3. Contract review pipeline — implemented
 
 ```mermaid
 flowchart LR
@@ -259,7 +312,13 @@ flowchart LR
     C3 --> D
     D --> E[Summary report]
     E --> F[WaitForApproval: legal]
+    F --> G[File report]
+    G -. compensate .-> R[Retract report]
 ```
+
+The fan-out is bounded and metered: `ctx.map_llm(risk_step, paragraphs,
+concurrency=4)`, every clause billed to the tenant and refused once the budget is
+gone. `tests/test_contract_review.py` drives it over the real HTTP surface.
 
 ---
 

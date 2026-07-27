@@ -63,7 +63,7 @@ def build_control_plane(
         if ledger is not None
         else None
     )
-    engine = Engine(store, registry, timers=timers, budget=guard)
+    engine = Engine(store, registry, timers=timers, budget=guard, queue=queue)
     worker = Worker(engine, queue, locks)
     wheel = TimerWheel(engine, timers, queue) if timers is not None else None
     dispatcher = TriggerDispatcher(

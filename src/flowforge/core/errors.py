@@ -48,6 +48,20 @@ class RateLimitedError(RetryableError):
     """
 
 
+class ChildFailedError(ActivityFailedError):
+    """A child workflow failed, so the parent fails too.
+
+    An :class:`ActivityFailedError` on purpose: from the parent's side a child is
+    just a step that did not deliver, and it should unwind through the same saga
+    path — the child has already compensated its own work, the parent still owes
+    its own.
+    """
+
+    def __init__(self, workflow: str, run_id: str, message: str) -> None:
+        self.child_run_id = run_id
+        super().__init__(f"child:{workflow}", f"{message} (run {run_id})")
+
+
 class ConcurrencyError(FlowforgeError):
     """Optimistic-concurrency violation while appending to the event log.
 

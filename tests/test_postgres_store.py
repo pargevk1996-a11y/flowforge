@@ -14,7 +14,16 @@ import uuid
 import pytest
 from pydantic import BaseModel
 
-from flowforge import ConcurrencyError, Engine, Registry, RunStatus, WorkflowContext
+from flowforge import (
+    ConcurrencyError,
+    Engine,
+    InMemoryLockManager,
+    InMemoryTaskQueue,
+    Registry,
+    RunStatus,
+    Worker,
+    WorkflowContext,
+)
 from flowforge.core.events import Event, EventType
 from flowforge.persistence import PostgresEventStore, apply_migrations
 
@@ -91,6 +100,48 @@ async def test_suspend_is_durable_and_resumes() -> None:
         res = await Engine(store, reg).fire_timer(run_id)
         assert res.status is RunStatus.COMPLETED
         assert charged == [7]
+    finally:
+        await store.close()
+
+
+async def test_child_fan_out_is_durable_across_engines() -> None:
+    """A fan-out over child runs is several logs coordinating through the
+    database; a fresh engine must be able to pick it up mid-flight."""
+    doubled: list[int] = []
+
+    async def double(ctx: WorkflowContext, inp: Money) -> Receipt:
+        doubled.append(inp.amount)
+        return Receipt(txn=f"x{inp.amount * 2}")
+
+    async def parent(ctx: WorkflowContext, inp: Money) -> Receipt:
+        results: list[Receipt] = await ctx.children(
+            "double_pg", [Money(amount=n) for n in range(1, 4)], concurrency=2
+        )
+        return Receipt(txn=",".join(r.txn for r in results))
+
+    store = await _store()
+    try:
+        reg = Registry()
+        reg.add(double, name="double_pg")
+        definition = reg.add(parent, name="parent_pg")
+        queue = InMemoryTaskQueue()
+        run_id = uuid.uuid4().hex
+
+        res = await Engine(store, reg, queue=queue).start(run_id, definition, Money(amount=0))
+        assert res.status is RunStatus.SUSPENDED
+        assert await queue.size() == 2  # only the bound, queued for a worker
+
+        # A brand-new engine, a brand-new worker: the fan-out is entirely in the
+        # database, so it resumes and finishes.
+        engine = Engine(store, reg, queue=queue)
+        worker = Worker(engine, queue, InMemoryLockManager())
+        while await worker.run_once() is not None:
+            pass
+
+        final = await engine.describe(run_id)
+        assert final.status is RunStatus.COMPLETED
+        assert final.result == {"txn": "x2,x4,x6"}
+        assert sorted(doubled) == [1, 2, 3]
     finally:
         await store.close()
 
