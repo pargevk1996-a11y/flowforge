@@ -12,11 +12,11 @@ help: ## Show this help
 venv: ## Create the virtualenv
 	python3.12 -m venv $(VENV)
 
-install: venv ## Install the package with dev extras
-	$(PIP) install -e ".[dev]"
+install: venv ## Install the package with dev + serve extras
+	$(PIP) install -e ".[dev,serve]"
 
 lint: ## Run ruff
-	$(VENV)/bin/ruff check src tests
+	$(VENV)/bin/ruff check src tests workflows
 
 typecheck: ## Run mypy --strict
 	$(VENV)/bin/mypy

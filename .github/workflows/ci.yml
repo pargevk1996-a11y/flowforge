@@ -14,9 +14,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e ".[dev]"
+        # serve too: mypy checks the API, and without fastapi's real types every
+        # route decorator reads as untyped and --strict rejects the file.
+        run: pip install -e ".[dev,serve]"
       - name: Lint
-        run: ruff check src tests
+        run: ruff check src tests workflows
       - name: Typecheck
         run: mypy
       - name: Test

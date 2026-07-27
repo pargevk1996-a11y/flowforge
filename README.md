@@ -62,7 +62,9 @@ loop with a priority queue and distributed locks (in-memory + Redis), and a
 **Postgres-backed event store** with a migration runner — the durability tests
 run against a real database. Every LLM call is billed to its tenant in a durable
 **cost ledger**, capped by a rolling per-tenant budget, and paced by a
-per-provider rate limit. All green under `mypy --strict`.
+per-provider rate limit. Runs start from **triggers** — webhook, inbound email, or
+cron — with exactly-once delivery claims over at-least-once sources. All green
+under `mypy --strict`.
 
 ```bash
 # Run the Postgres integration tests against a throwaway database:
@@ -91,8 +93,8 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | Timer wheel — durable `sleep` wakes runs automatically (in-memory + Postgres, tested on a real DB) | ✅ done |
 | FastAPI control plane (start / status / timeline / signal) + **invoice-to-payment** reference workflow end-to-end | ✅ done |
 | Per-tenant cost budgets (durable `cost_ledger`, cancel + compensate on exceed) & per-provider rate limits | ✅ done |
-| Triggers (HTTP / webhook / cron / email) | 🔜 next |
-| Sub-workflows, fan-out/fan-in with bounded concurrency | 🔜 |
+| Triggers — HTTP/webhook, inbound email, cron — with exactly-once delivery claims | ✅ done |
+| Sub-workflows, fan-out/fan-in with bounded concurrency | 🔜 next |
 | React/Vite timeline & replay debugger UI | 🔜 |
 
 ---
@@ -109,12 +111,61 @@ A thin FastAPI surface over the engine. Runs are enqueued and driven by a worker
 | `GET /runs/{id}/timeline` | the full event log — every prompt, LLM result, retry, wait, and cost |
 | `POST /runs/{id}/signals` | deliver a signal, e.g. the CFO approval that wakes a suspended run |
 | `GET /tenants/{tenant}/spend` | spend in the current window, the limit, and what is left |
+| `GET /triggers` | the registered triggers, their kinds and schedules |
+| `POST /triggers/{name}` | deliver an external event: a webhook body, or a provider's inbound email |
 
-`POST /runs` answers `402` when the tenant's budget is already exhausted.
+`POST /runs` and `POST /triggers/{name}` answer `402` when the tenant's budget is
+already exhausted.
 
 The end-to-end tests in `tests/test_invoice_api.py` drive the real HTTP surface
 through auto-pay under the threshold, human approval above it, rejection, and saga
 rollback when a downstream step fails.
+
+---
+
+## Triggers
+
+A run has to start somehow, and in a business process it is rarely a human
+pressing a button: an invoice arrives as email, an AP system calls a webhook, a
+sweep runs hourly. All three land on one dispatcher, so they inherit one set of
+guarantees.
+
+| Kind | Arrives as | Deduped on |
+|---|---|---|
+| `webhook` | `POST /triggers/{name}` with a JSON body | whatever identity the sender provides (`X-Idempotency-Key`, or a field the trigger picks) |
+| `email` | the same endpoint, carrying a provider's inbound-email payload | the mail's own `Message-ID` |
+| `cron` | a five-field schedule, driven by the scheduler loop | the tick's own timestamp |
+
+**Exactly-once, out of at-least-once.** Every external source retries — that is
+what makes them reliable, and it is also what would pay an invoice twice. So the
+dispatcher *claims* the event's identity in `trigger_deliveries` before it creates
+anything, and a redelivery gets `200` with `started: false` and the run id the
+first delivery started. The claim is a single `INSERT ... ON CONFLICT DO NOTHING
+RETURNING`, so ten concurrent deliveries of one webhook produce one winner and
+nine runners-up — proven against a real database in `tests/test_postgres_triggers.py`.
+
+A crash between claiming and seeding the run would strand the event; the retry
+that follows notices the claim has no run behind it and finishes the job under the
+claimed id.
+
+**Cron catches up.** The scheduler remembers the last tick it fired, so a process
+that was down for four hours replays the four ticks it missed instead of skipping
+them — bounded per pass, because a minutely schedule after a long outage owes
+thousands of runs and flooding the queue is worse than draining it. Each tick is
+dispatched under its own timestamp, so catching up twice, or running two
+schedulers, still yields one run per tick.
+
+```python
+register_invoice_triggers(cp.triggers, tenant="acme")
+
+# an invoice PDF mailed to the AP inbox, an AP system's callback, an hourly sweep
+POST /triggers/invoice_email    {"Message-Id": "...", "attachments": [...]}
+POST /triggers/invoice_webhook  {"invoice_id": "INV-1", "pdf_url": "s3://..."}
+```
+
+The email mapper is handed a parsed `InboundEmail` rather than a provider's raw
+body, so a workflow never learns which vendor relays its mail — `parse_inbound`
+normalises the Mailgun/Postmark/SES shapes into one model.
 
 ---
 

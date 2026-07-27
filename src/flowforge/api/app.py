@@ -1,10 +1,16 @@
 """FastAPI control plane.
 
 Thin HTTP surface over the engine: start a run, inspect its status, read its full
-event timeline, deliver a signal (e.g. a human approval), and read a tenant's
-spend. Runs are enqueued for a worker to drive; with ``run_background=True`` the
-app runs its own worker and timer-wheel loops, so the whole thing is live behind
-``flowforge api``.
+event timeline, deliver a signal (e.g. a human approval), read a tenant's spend,
+and receive external events on a trigger. Runs are enqueued for a worker to drive;
+with ``run_background=True`` the app runs its own worker, timer-wheel and cron
+loops, so the whole thing is live behind ``flowforge api``.
+
+``POST /triggers/{name}`` is the door webhooks and inbound email come through. It
+is deliberately boring about retries: a redelivered event returns ``200`` with the
+run id the first delivery started and ``started: false``, because a sender that
+gets an error will simply try again, and two runs for one invoice is the failure
+mode that actually costs money.
 
 Budgets are enforced twice, on purpose: admission control refuses to *start* a run
 for an exhausted tenant (``402``), and the meter inside each LLM step refuses to
@@ -16,14 +22,18 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from pydantic import BaseModel, TypeAdapter
 
 from flowforge.api.controlplane import ControlPlane
-from flowforge.core.errors import BudgetExceededError, WorkflowNotFoundError
+from flowforge.core.errors import (
+    BudgetExceededError,
+    TriggerNotFoundError,
+    WorkflowNotFoundError,
+)
 from flowforge.queue.worker import submit
 
 
@@ -43,7 +53,10 @@ def create_app(cp: ControlPlane, *, run_background: bool = False) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> Any:
         stop = asyncio.Event()
-        tasks = [asyncio.create_task(cp.worker.run_forever(stop=stop))]
+        tasks = [
+            asyncio.create_task(cp.worker.run_forever(stop=stop)),
+            asyncio.create_task(cp.cron.run_forever(stop=stop)),
+        ]
         if cp.wheel is not None:
             tasks.append(asyncio.create_task(cp.wheel.run_forever(stop=stop)))
         try:
@@ -102,6 +115,45 @@ def create_app(cp: ControlPlane, *, run_background: bool = False) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         await cp.queue.enqueue(run_id)
         return {"ok": True}
+
+    @app.get("/triggers")
+    async def list_triggers() -> dict[str, Any]:
+        return {
+            "triggers": [
+                {
+                    "name": t.name,
+                    "kind": t.kind,
+                    "workflow": t.workflow,
+                    "tenant": t.tenant,
+                    "schedule": t.schedule,
+                }
+                for t in cp.triggers.all()
+            ]
+        }
+
+    @app.post("/triggers/{name}")
+    async def fire_trigger(
+        name: str,
+        event: Annotated[dict[str, Any] | None, Body()] = None,
+        idempotency_key: Annotated[
+            str | None, Header(alias="X-Idempotency-Key")
+        ] = None,
+    ) -> dict[str, Any]:
+        try:
+            delivery = await cp.dispatcher.fire(name, event or {}, key=idempotency_key)
+        except TriggerNotFoundError as exc:
+            raise HTTPException(404, f"unknown trigger {name!r}") from exc
+        except BudgetExceededError as exc:
+            raise HTTPException(402, str(exc)) from exc
+        except ValueError as exc:  # includes pydantic's ValidationError
+            # The event does not describe a run this workflow can start. 422, not
+            # 500: the sender's payload is wrong, and retrying it will not help.
+            raise HTTPException(422, f"event does not fit trigger {name!r}: {exc}") from exc
+        return {
+            "trigger": delivery.trigger,
+            "run_id": delivery.run_id,
+            "started": delivery.started,
+        }
 
     @app.get("/tenants/{tenant}/spend")
     async def get_spend(tenant: str) -> dict[str, Any]:

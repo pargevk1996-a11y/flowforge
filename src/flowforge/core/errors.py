@@ -61,6 +61,10 @@ class WorkflowNotFoundError(FlowforgeError):
     """No workflow is registered under the given name."""
 
 
+class TriggerNotFoundError(FlowforgeError):
+    """No trigger is registered under the given name."""
+
+
 class Suspended(BaseException):
     """Raised to suspend a run until an external event (timer/signal) arrives.
 

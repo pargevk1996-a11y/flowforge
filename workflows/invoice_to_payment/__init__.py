@@ -15,9 +15,18 @@ from workflows.invoice_to_payment.schemas import (
     VendorMatch,
 )
 from workflows.invoice_to_payment.services import InvoiceServices
+from workflows.invoice_to_payment.triggers import (
+    EMAIL_TRIGGER,
+    SWEEP_TRIGGER,
+    WEBHOOK_TRIGGER,
+    register_invoice_triggers,
+)
 from workflows.invoice_to_payment.workflow import build_invoice_to_payment
 
 __all__ = [
+    "EMAIL_TRIGGER",
+    "SWEEP_TRIGGER",
+    "WEBHOOK_TRIGGER",
     "CfoDecision",
     "ExtractedInvoice",
     "InvoiceInput",
@@ -25,4 +34,5 @@ __all__ = [
     "PaymentResult",
     "VendorMatch",
     "build_invoice_to_payment",
+    "register_invoice_triggers",
 ]
