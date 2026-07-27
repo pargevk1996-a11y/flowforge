@@ -44,6 +44,24 @@ class PostgresCostLedger:
             Decimal(str(entry.usd)),
         )
 
+    async def entries_for_run(self, run_id: str) -> list[CostEntry]:
+        rows = await self._pool.fetch(
+            "SELECT run_id, tenant_id, command_seq, provider, model, usd_cost "
+            "FROM cost_ledger WHERE run_id = $1 ORDER BY id",
+            run_id,
+        )
+        return [
+            CostEntry(
+                run_id=row["run_id"],
+                tenant=row["tenant_id"],
+                model=row["model"] or "",
+                usd=float(row["usd_cost"]),
+                command_seq=row["command_seq"],
+                provider=row["provider"],
+            )
+            for row in rows
+        ]
+
     async def spend_since(self, tenant: str, since: datetime) -> float:
         total = await self._pool.fetchval(
             "SELECT COALESCE(SUM(usd_cost), 0) FROM cost_ledger "

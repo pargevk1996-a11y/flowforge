@@ -120,6 +120,7 @@ class WorkflowContext:
         retry: RetryPolicy | None = None,
         compensate: Callable[[], Awaitable[None]] | None = None,
         result_type: type[T] | None = None,
+        kind: str = "activity",
     ) -> T:
         """Run a side-effecting step durably, with typed retry and an optional
         compensation for the saga rollback.
@@ -135,6 +136,7 @@ class WorkflowContext:
             retry=retry,
             compensate=compensate,
             adapter=self._adapter(fn, result_type),
+            kind=kind,
         )
 
     async def _activity_at[T](
@@ -147,6 +149,7 @@ class WorkflowContext:
         retry: RetryPolicy | None,
         compensate: Callable[[], Awaitable[None]] | None,
         adapter: TypeAdapter[Any],
+        kind: str = "activity",
     ) -> T:
         """One activity under an already-allocated command number.
 
@@ -163,7 +166,11 @@ class WorkflowContext:
         if failed is not None:
             raise ActivityFailedError(label, str(failed.payload.get("error")))
 
-        await self._append(EventType.ACTIVITY_SCHEDULED, command_seq=cs, name=label)
+        # The kind is recorded, not inferred: a timeline that cannot tell a model
+        # call from an ordinary step cannot show what a run spent its money on.
+        await self._append(
+            EventType.ACTIVITY_SCHEDULED, command_seq=cs, name=label, payload={"kind": kind}
+        )
         return await self._execute(fn, args, cs, label, retry or RetryPolicy(), compensate, adapter)
 
     async def llm[TOutput](
@@ -192,6 +199,7 @@ class WorkflowContext:
             name=name or step.name,
             retry=retry,
             result_type=step.output_type,
+            kind="llm",
         )
 
     async def map[TItem, TOut](
@@ -275,6 +283,7 @@ class WorkflowContext:
                 retry=retry,
                 compensate=None,
                 adapter=adapter,
+                kind="llm",
             )
             for index, (cs, content) in enumerate(zip(seqs, contents, strict=True))
         ]

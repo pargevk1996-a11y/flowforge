@@ -56,6 +56,10 @@ class CostLedger(Protocol):
         """Total USD charged to ``tenant`` at or after ``since``."""
         ...
 
+    async def entries_for_run(self, run_id: str) -> list[CostEntry]:
+        """Every charge a single run incurred, for its timeline."""
+        ...
+
 
 class InMemoryCostLedger:
     def __init__(self, clock: Clock | None = None) -> None:
@@ -69,6 +73,9 @@ class InMemoryCostLedger:
         return float(
             sum(e.usd for at, e in self.entries if e.tenant == tenant and at >= since)
         )
+
+    async def entries_for_run(self, run_id: str) -> list[CostEntry]:
+        return [entry for _at, entry in self.entries if entry.run_id == run_id]
 
 
 @dataclass(frozen=True)

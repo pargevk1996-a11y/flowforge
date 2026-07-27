@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter
@@ -25,20 +24,14 @@ from flowforge.core.budget import BudgetGuard
 from flowforge.core.children import ChildOutcome, ParentRef
 from flowforge.core.errors import ActivityFailedError, ConcurrencyError, Suspended
 from flowforge.core.event_store import EventStore
-from flowforge.core.events import TERMINAL_EVENTS, Event, EventType
+from flowforge.core.events import Event, EventType
+from flowforge.core.timeline import RunStatus, derive_status, terminal_event
 from flowforge.core.timers import TimerStore
 from flowforge.workflow.context import DEFAULT_TENANT, Clock, WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef
 
 if TYPE_CHECKING:  # the queue package imports the engine, so keep the edge one-way
     from flowforge.queue.base import TaskQueue
-
-
-class RunStatus(StrEnum):
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SUSPENDED = "suspended"
 
 
 @dataclass
@@ -108,7 +101,7 @@ class Engine:
         if not history:
             raise ValueError(f"run {run_id!r} does not exist")
 
-        terminal = _terminal_event(history)
+        terminal = terminal_event(history)
         if terminal is not None:
             return self._terminal_result(terminal)
 
@@ -187,21 +180,10 @@ class Engine:
         history = await self._store.load(run_id)
         if not history:
             raise KeyError(run_id)
-        terminal = _terminal_event(history)
+        terminal = terminal_event(history)
         if terminal is not None:
             return self._terminal_result(terminal)
-        waiting = any(
-            _pending_command(history, started, *resolved) is not None
-            for started, resolved in (
-                (EventType.TIMER_STARTED, (EventType.TIMER_FIRED,)),
-                (EventType.WAIT_STARTED, (EventType.SIGNAL_RECEIVED,)),
-                (
-                    EventType.CHILD_STARTED,
-                    (EventType.CHILD_COMPLETED, EventType.CHILD_FAILED),
-                ),
-            )
-        )
-        return RunResult(RunStatus.SUSPENDED if waiting else RunStatus.RUNNING)
+        return RunResult(derive_status(history))
 
     # -- child workflows (the ChildLauncher protocol) ------------------------
 
@@ -238,7 +220,7 @@ class Engine:
         history = await self._store.load(run_id)
         if not history:
             return None
-        terminal = _terminal_event(history)
+        terminal = terminal_event(history)
         if terminal is None:
             return None
         completed = terminal.type == EventType.WORKFLOW_COMPLETED
@@ -271,7 +253,7 @@ class Engine:
         if parent is None:
             return
         history = await self._store.load(parent.run_id)
-        if not history or _terminal_event(history) is not None:
+        if not history or terminal_event(history) is not None:
             return
         if any(
             e.command_seq == parent.command_seq
@@ -322,14 +304,6 @@ class Engine:
         if event.type == EventType.WORKFLOW_COMPLETED:
             return RunResult(RunStatus.COMPLETED, result=event.payload.get("result"))
         return RunResult(RunStatus.FAILED, error=event.payload.get("error"))
-
-
-def _terminal_event(history: list[Event]) -> Event | None:
-    """The run's terminal event, wherever it sits in the log.
-
-    Not ``history[-1]``: a child that finishes just after its parent did appends
-    to the parent's log, so the terminal event is not always last."""
-    return next((e for e in history if e.type in TERMINAL_EVENTS), None)
 
 
 def _pending_command(

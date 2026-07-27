@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, TypeAdapter
 
 from flowforge.api.controlplane import ControlPlane
@@ -34,7 +36,31 @@ from flowforge.core.errors import (
     TriggerNotFoundError,
     WorkflowNotFoundError,
 )
+from flowforge.core.timeline import build_timeline
 from flowforge.queue.worker import submit
+
+
+async def _tree(cp: ControlPlane, run_id: str, *, depth: int) -> dict[str, Any] | None:
+    """A run and, recursively, the children it started."""
+    events = await cp.store.load(run_id)
+    if not events:
+        return None
+    timeline = build_timeline(run_id, events)
+    children: list[dict[str, Any]] = []
+    if depth > 0:
+        for step in timeline.steps:
+            if step.child_run_id is None:
+                continue
+            child = await _tree(cp, step.child_run_id, depth=depth - 1)
+            if child is not None:
+                children.append({**child, "command_seq": step.command_seq})
+    return {
+        "run_id": run_id,
+        "workflow": timeline.workflow,
+        "status": timeline.status,
+        "usd_cost": timeline.usd_cost,
+        "children": children,
+    }
 
 
 class StartRunRequest(BaseModel):
@@ -49,7 +75,12 @@ class SignalRequest(BaseModel):
     data: dict[str, Any] | None = None
 
 
-def create_app(cp: ControlPlane, *, run_background: bool = False) -> FastAPI:
+def create_app(
+    cp: ControlPlane,
+    *,
+    run_background: bool = False,
+    ui_dir: Path | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> Any:
         stop = asyncio.Event()
@@ -100,12 +131,49 @@ def create_app(cp: ControlPlane, *, run_background: bool = False) -> FastAPI:
             "error": info.error,
         }
 
+    @app.get("/runs")
+    async def list_runs(
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        tenant: str | None = None,
+        workflow: str | None = None,
+    ) -> dict[str, Any]:
+        page = await cp.store.list_runs(
+            limit=min(max(limit, 1), 200),
+            offset=max(offset, 0),
+            status=status,
+            tenant=tenant,
+            workflow=workflow,
+        )
+        return page.model_dump(mode="json")
+
     @app.get("/runs/{run_id}/timeline")
-    async def get_timeline(run_id: str) -> dict[str, Any]:
+    async def get_timeline(run_id: str, at: int | None = None) -> dict[str, Any]:
+        """The run projected into steps, plus the raw log behind them.
+
+        ``at`` truncates the log to that event, which *is* the replay debugger:
+        the projection is a pure function of a prefix, so a shorter list is
+        exactly what the engine would have seen at that point."""
         events = await cp.store.load(run_id)
         if not events:
             raise HTTPException(404, f"unknown run {run_id!r}")
-        return {"run_id": run_id, "events": [e.model_dump(mode="json") for e in events]}
+        if at is not None:
+            events = events[: max(at, 0) + 1]
+        costs = await cp.ledger.entries_for_run(run_id) if cp.ledger is not None else []
+        timeline = build_timeline(run_id, events, costs=costs, truncated_at=at)
+        return {
+            **timeline.model_dump(mode="json"),
+            "events": [e.model_dump(mode="json") for e in events],
+        }
+
+    @app.get("/runs/{run_id}/tree")
+    async def get_tree(run_id: str, depth: int = 3) -> dict[str, Any]:
+        """The run and its sub-workflows, since a fan-out is many logs at once."""
+        node = await _tree(cp, run_id, depth=max(min(depth, 8), 0))
+        if node is None:
+            raise HTTPException(404, f"unknown run {run_id!r}")
+        return node
 
     @app.post("/runs/{run_id}/signals")
     async def send_signal(run_id: str, req: SignalRequest) -> dict[str, bool]:
@@ -167,5 +235,10 @@ def create_app(cp: ControlPlane, *, run_background: bool = False) -> FastAPI:
             "remaining_usd": await cp.budget.remaining(tenant),
             "window_seconds": budget.window.total_seconds() if budget is not None else None,
         }
+
+    if ui_dir is not None and (ui_dir / "index.html").exists():
+        # Mounted last, at the root, so it catches everything the API did not —
+        # and `html=True` serves index.html for the hash routes the UI owns.
+        app.mount("/", StaticFiles(directory=ui_dir, html=True), name="ui")
 
     return app

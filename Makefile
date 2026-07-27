@@ -3,7 +3,7 @@ VENV := .venv
 PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
-.PHONY: help venv install lint typecheck test check up down
+.PHONY: help venv install lint typecheck test check up down ui ui-install serve
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -24,7 +24,16 @@ typecheck: ## Run mypy --strict
 test: ## Run the test suite
 	$(VENV)/bin/pytest
 
-check: lint typecheck test ## Run the full gate
+ui-install: ## Install the debugger UI's dependencies
+	npm --prefix ui ci
+
+ui: ## Typecheck, test and build the debugger UI
+	npm --prefix ui run typecheck && npm --prefix ui test && npm --prefix ui exec vite build
+
+serve: ## Run the control plane + debugger on :8000 (demo workflows, canned LLM)
+	$(VENV)/bin/flowforge api --demo
+
+check: lint typecheck test ## Run the full Python gate
 
 up: ## Start local infra (postgres + redis)
 	docker compose up -d

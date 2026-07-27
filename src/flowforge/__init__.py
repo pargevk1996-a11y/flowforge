@@ -11,7 +11,7 @@ from flowforge.core.budget import (
     InMemoryCostLedger,
 )
 from flowforge.core.children import ChildLauncher, ChildOutcome, ParentRef
-from flowforge.core.engine import Engine, RunResult, RunStatus
+from flowforge.core.engine import Engine, RunResult
 from flowforge.core.errors import (
     ActivityFailedError,
     BudgetExceededError,
@@ -26,6 +26,14 @@ from flowforge.core.errors import (
 )
 from flowforge.core.event_store import EventStore, InMemoryEventStore
 from flowforge.core.retry import RetryPolicy
+from flowforge.core.timeline import (
+    RunStatus,
+    Step,
+    StepKind,
+    StepStatus,
+    Timeline,
+    build_timeline,
+)
 from flowforge.core.timers import DueTimer, InMemoryTimerStore, TimerStore
 from flowforge.queue import (
     InMemoryLockManager,
@@ -71,14 +79,19 @@ __all__ = [
     "RetryableError",
     "RunResult",
     "RunStatus",
+    "Step",
+    "StepKind",
+    "StepStatus",
     "Suspended",
     "TaskQueue",
+    "Timeline",
     "TimerStore",
     "TimerWheel",
     "Worker",
     "WorkflowContext",
     "WorkflowDef",
     "WorkflowNotFoundError",
+    "build_timeline",
     "define",
     "submit",
 ]

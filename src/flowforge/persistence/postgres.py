@@ -15,7 +15,9 @@ from collections.abc import Sequence
 from typing import Any
 
 from flowforge.core.errors import ConcurrencyError
-from flowforge.core.events import TERMINAL_EVENTS, Event, EventType
+from flowforge.core.event_store import RunPage, RunSummary
+from flowforge.core.events import Event, EventType
+from flowforge.core.timeline import RunStatus
 
 
 async def _init_connection(conn: Any) -> None:
@@ -25,11 +27,24 @@ async def _init_connection(conn: Any) -> None:
     )
 
 
+_SUSPENDING = frozenset(
+    {EventType.TIMER_STARTED, EventType.WAIT_STARTED, EventType.CHILD_STARTED}
+)
+
+
 def _status_for(last: Event) -> str:
+    """The status to project onto the run row from the event just appended.
+
+    A projection for browsing, not the authority: a parent waiting on three
+    children reads as ``running`` for the moment between one child reporting back
+    and the parent being driven again. ``Engine.describe`` derives the exact
+    status from the log, and the timeline endpoint reports that."""
     if last.type == EventType.WORKFLOW_COMPLETED:
         return "completed"
     if last.type == EventType.WORKFLOW_FAILED:
         return "failed"
+    if last.type in _SUSPENDING:
+        return "suspended"
     return "running"
 
 
@@ -117,5 +132,46 @@ class PostgresEventStore:
                 "WHERE run_id = $1",
                 run_id,
                 current + len(events),
-                _status_for(events[-1]) if events[-1].type in TERMINAL_EVENTS else "running",
+                _status_for(events[-1]),
             )
+
+    async def list_runs(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        tenant: str | None = None,
+        workflow: str | None = None,
+    ) -> RunPage:
+        rows = await self._pool.fetch(
+            "SELECT run_id, workflow_name, tenant_id, status, version, created_at, "
+            "       updated_at, COUNT(*) OVER() AS total "
+            "FROM workflow_runs "
+            "WHERE ($1::text IS NULL OR status = $1) "
+            "  AND ($2::text IS NULL OR tenant_id = $2) "
+            "  AND ($3::text IS NULL OR workflow_name = $3) "
+            "ORDER BY created_at DESC, run_id DESC LIMIT $4 OFFSET $5",
+            status,
+            tenant,
+            workflow,
+            limit,
+            offset,
+        )
+        return RunPage(
+            runs=[
+                RunSummary(
+                    run_id=row["run_id"],
+                    workflow=row["workflow_name"],
+                    tenant=row["tenant_id"],
+                    status=RunStatus(row["status"]),
+                    version=row["version"],
+                    started_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+                for row in rows
+            ],
+            total=int(rows[0]["total"]) if rows else 0,
+            limit=limit,
+            offset=offset,
+        )

@@ -65,7 +65,8 @@ run against a real database. Every LLM call is billed to its tenant in a durable
 per-provider rate limit. Runs start from **triggers** — webhook, inbound email, or
 cron — with exactly-once delivery claims over at-least-once sources, and fan out
 over activities, LLM steps or **child runs** with a bound that survives a restart.
-All green under `mypy --strict`.
+A React/Vite **replay debugger** scrubs any run back through its own log. All green
+under `mypy --strict` and `tsc --strict`.
 
 ```bash
 # Run the Postgres integration tests against a throwaway database:
@@ -77,7 +78,12 @@ DATABASE_URL=postgresql://flowforge:flowforge@localhost:5432/flowforge pytest
 ```bash
 make install   # venv + editable install with dev + serve extras
 make check     # ruff + mypy --strict + pytest
+make ui-install && make ui   # tsc --strict + vitest + vite build
+make serve     # the control plane and the debugger on :8000
 ```
+
+`make serve` runs both reference workflows against a **canned LLM client** — no key,
+no database, no queue — so the whole engine is explorable from one command.
 
 The tests in `tests/test_engine.py` are the executable spec for the properties
 above (idempotency across replay, resume after a simulated `kill -9`,
@@ -96,7 +102,7 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | Per-tenant cost budgets (durable `cost_ledger`, cancel + compensate on exceed) & per-provider rate limits | ✅ done |
 | Triggers — HTTP/webhook, inbound email, cron — with exactly-once delivery claims | ✅ done |
 | Sub-workflows, fan-out/fan-in with bounded concurrency + **contract-review** reference workflow | ✅ done |
-| React/Vite timeline & replay debugger UI | 🔜 next |
+| React/Vite timeline & **replay debugger** UI (`flowforge api --demo`) | ✅ done |
 
 ---
 
@@ -109,9 +115,11 @@ A thin FastAPI surface over the engine. Runs are enqueued and driven by a worker
 |---|---|
 | `POST /runs` | start a run: `{workflow, input, priority?, tenant?}` → `{run_id}` |
 | `GET /runs/{id}` | status: `running` / `suspended` / `completed` / `failed` (+ result/error) |
-| `GET /runs/{id}/timeline` | the full event log — every prompt, LLM result, retry, wait, and cost |
+| `GET /runs/{id}/timeline` | the run folded into **steps** + the raw log; `?at=N` replays it to that point |
 | `POST /runs/{id}/signals` | deliver a signal, e.g. the CFO approval that wakes a suspended run |
 | `GET /tenants/{tenant}/spend` | spend in the current window, the limit, and what is left |
+| `GET /runs` | browse runs: filter by `status`, `tenant`, `workflow`; paginated |
+| `GET /runs/{id}/tree` | the run and its sub-workflows, since a fan-out is many logs |
 | `GET /triggers` | the registered triggers, their kinds and schedules |
 | `POST /triggers/{name}` | deliver an external event: a webhook body, or a provider's inbound email |
 
@@ -121,6 +129,37 @@ already exhausted.
 The end-to-end tests in `tests/test_invoice_api.py` drive the real HTTP surface
 through auto-pay under the threshold, human approval above it, rejection, and saga
 rollback when a downstream step fails.
+
+---
+
+## The replay debugger
+
+```
+make ui-install && make ui && make serve    # → http://localhost:8000
+```
+
+A run's log is the truth, but it is a stream of low-level facts — *scheduled*,
+*completed*, *fired*. The debugger projects it into the **step**: this activity,
+this LLM call, this approval; what it returned, how long it took, what it cost.
+
+- **Run list** — filter by status, tenant or workflow; refreshes itself, because
+  a worker finishes a run while you are looking at it.
+- **Steps** — one row per command, with the LLM calls marked and a cost bar, so
+  the one clause out of forty that spent real money is visible at a glance.
+  Failures-first ordering for triage; expand a row for its payloads.
+- **Events** — the raw log underneath, with the events of the selected step
+  highlighted. When the projection and your expectations disagree, this settles it.
+- **Tree** — parent and child runs, since a fan-out is many logs at once.
+
+**Time travel is not a simulation.** The projection is a pure function of a
+*prefix* of the log, so dragging the scrubber to event N asks the server for
+`build_timeline(run_id, events[:N+1])` — which is exactly what the engine would
+have replayed from at that point. There is no snapshot machinery, and there is
+nothing to keep in sync: a shorter list is the past.
+
+The UI is React + Vite + TypeScript (`tsc --strict`), no component library, no
+state library, ~800 lines. `flowforge api` serves the built app beside the API on
+one origin; `npm --prefix ui run dev` proxies to it for hacking on the frontend.
 
 ---
 

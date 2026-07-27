@@ -33,6 +33,7 @@ class ControlPlane:
     cron: CronScheduler
     wheel: TimerWheel | None = None
     budget: BudgetGuard | None = None
+    ledger: CostLedger | None = None
 
 
 def build_control_plane(
@@ -85,4 +86,5 @@ def build_control_plane(
         cron=CronScheduler(dispatcher, triggers, cron_state),
         wheel=wheel,
         budget=guard,
+        ledger=ledger,
     )

@@ -65,7 +65,7 @@ mypy_path = "src"
 files = ["src", "tests", "workflows"]
 
 [[tool.mypy.overrides]]
-module = ["redis.*", "asyncpg.*"]
+module = ["redis.*", "asyncpg.*", "uvicorn.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
