@@ -12,6 +12,7 @@ import asyncio
 
 from flowforge.core.engine import Engine
 from flowforge.core.events import utcnow
+from flowforge.core.supervision import supervise
 from flowforge.core.timers import TimerStore
 from flowforge.queue.base import TaskQueue
 from flowforge.workflow.context import Clock
@@ -48,6 +49,8 @@ class TimerWheel:
     async def run_forever(
         self, *, interval: float = 1.0, stop: asyncio.Event | None = None
     ) -> None:
-        while stop is None or not stop.is_set():
+        async def step() -> None:
             await self.tick()
             await asyncio.sleep(interval)
+
+        await supervise(step, label="timer wheel", stop=stop)

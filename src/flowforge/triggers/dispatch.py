@@ -26,7 +26,7 @@ from pydantic import TypeAdapter
 
 from flowforge.core.budget import BudgetGuard
 from flowforge.core.engine import Engine
-from flowforge.core.errors import ConcurrencyError
+from flowforge.core.errors import ConcurrencyError, RunNotFoundError
 from flowforge.queue.base import TaskQueue
 from flowforge.queue.worker import submit
 from flowforge.triggers.base import Event, TriggerRegistry
@@ -107,6 +107,6 @@ class TriggerDispatcher:
     async def _run_exists(self, run_id: str) -> bool:
         try:
             await self._engine.describe(run_id)
-        except KeyError:
+        except RunNotFoundError:
             return False
         return True

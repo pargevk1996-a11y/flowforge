@@ -26,7 +26,7 @@ from flowforge import (
 )
 from flowforge.api import build_control_plane, create_app
 from flowforge.api.controlplane import ControlPlane
-from flowforge.core.errors import NonRetryableError
+from flowforge.core.errors import NonRetryableError, RunNotFoundError
 from flowforge.core.timeline import StepKind, StepStatus
 from flowforge.llm import LLMStep, ModelPrice, Pricing, ScriptedLLMClient
 
@@ -167,7 +167,7 @@ async def test_the_timeline_of_a_prefix_is_the_past() -> None:
 
 
 def test_an_unknown_run_has_no_timeline() -> None:
-    with pytest.raises(KeyError):
+    with pytest.raises(RunNotFoundError):
         build_timeline("nope", [])
 
 

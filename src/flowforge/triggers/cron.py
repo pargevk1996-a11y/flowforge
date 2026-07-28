@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from flowforge.core.events import utcnow
+from flowforge.core.supervision import supervise
 from flowforge.triggers.base import Trigger, TriggerKind, TriggerRegistry
 from flowforge.triggers.dispatch import Delivery, TriggerDispatcher
 from flowforge.workflow.context import Clock
@@ -139,6 +140,8 @@ class CronStateStore(Protocol):
         ...
 
     async def set_last_fired(self, trigger: str, at: datetime) -> None:
+        """Advance the cursor. Monotonic: a scheduler running behind its peer
+        must never rewind the fleet into ticks the peer has already dispatched."""
         ...
 
 
@@ -150,7 +153,8 @@ class InMemoryCronStateStore:
         return self._state.get(trigger)
 
     async def set_last_fired(self, trigger: str, at: datetime) -> None:
-        self._state[trigger] = at
+        current = self._state.get(trigger)
+        self._state[trigger] = at if current is None else max(current, at)
 
 
 class CronScheduler:
@@ -223,6 +227,8 @@ class CronScheduler:
     async def run_forever(
         self, *, interval: float = 1.0, stop: asyncio.Event | None = None
     ) -> None:
-        while stop is None or not stop.is_set():
+        async def step() -> None:
             await self.tick()
             await asyncio.sleep(interval)
+
+        await supervise(step, label="cron scheduler", stop=stop)

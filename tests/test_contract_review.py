@@ -120,7 +120,7 @@ async def test_high_risk_waits_for_legal_and_can_be_rejected() -> None:
         assert services.filed == {}
 
 
-async def test_failed_filing_rolls_back() -> None:
+async def test_a_failed_filing_leaves_nothing_filed() -> None:
     cp, services, _client = _plane(["low", "low"], fail_filing=True)
     async with _http(cp) as http:
         run_id = (await http.post("/runs", json=_START)).json()["run_id"]

@@ -75,6 +75,14 @@ class WorkflowNotFoundError(FlowforgeError):
     """No workflow is registered under the given name."""
 
 
+class RunNotFoundError(FlowforgeError):
+    """No run exists under the given id.
+
+    Distinct from a run that failed: there is nothing to retry, resume or report
+    on, so a worker handed one of these drops it rather than requeueing forever.
+    """
+
+
 class TriggerNotFoundError(FlowforgeError):
     """No trigger is registered under the given name."""
 

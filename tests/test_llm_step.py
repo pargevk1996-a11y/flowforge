@@ -14,6 +14,7 @@ from flowforge.llm import (
     Pricing,
     SchemaViolationError,
     ScriptedLLMClient,
+    UnknownModelPriceError,
 )
 
 
@@ -66,6 +67,26 @@ async def test_gives_up_after_budget() -> None:
     with pytest.raises(SchemaViolationError):
         await step.run("extract")
     assert len(client.calls) == 3
+
+
+async def test_an_unpriced_model_never_silently_costs_nothing() -> None:
+    """A typo in a model name must not disable every budget that depends on it."""
+    client = ScriptedLLMClient(['{"vendor": "Acme", "amount": 1}'] * 3)
+    step = LLMStep(client, "test-modle", Invoice, pricing=_pricing())  # typo
+
+    with pytest.raises(UnknownModelPriceError, match="test-modle"):
+        await step.run("extract")
+    assert client.calls == []  # refused before spending, not after
+
+
+async def test_a_step_with_no_price_list_is_simply_not_priced() -> None:
+    """Not asking for costing is different from asking and getting it wrong."""
+    client = ScriptedLLMClient(['{"vendor": "Acme", "amount": 1}'])
+    cost = CostTracker()
+    step = LLMStep(client, "whatever", Invoice, cost=cost)
+
+    assert await step.run("extract") == Invoice(vendor="Acme", amount=1)
+    assert cost.total_usd == 0.0
 
 
 async def test_llm_step_is_durable_through_engine() -> None:

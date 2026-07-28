@@ -21,6 +21,7 @@ from flowforge.core.errors import (
     NonRetryableError,
     RateLimitedError,
     RetryableError,
+    RunNotFoundError,
     Suspended,
     WorkflowNotFoundError,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "Registry",
     "RetryPolicy",
     "RetryableError",
+    "RunNotFoundError",
     "RunResult",
     "RunStatus",
     "Step",

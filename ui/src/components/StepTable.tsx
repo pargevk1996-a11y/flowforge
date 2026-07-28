@@ -9,6 +9,8 @@ interface Props {
   steps: Step[];
   selected: number | null;
   triage: boolean;
+  /** True when the view is a prefix of the log rather than all of it. */
+  replaying: boolean;
   onSelect: (commandSeq: number | null) => void;
   onOpenChild: (runId: string) => void;
 }
@@ -18,9 +20,15 @@ interface Props {
  * bar is drawn from each step's share of the run's spend, which is how you find
  * the one clause out of forty that cost real money.
  */
-export function StepTable({ steps, selected, triage, onSelect, onOpenChild }: Props) {
+export function StepTable({ steps, selected, triage, replaying, onSelect, onOpenChild }: Props) {
   if (steps.length === 0) {
-    return <p className="empty">Nothing has happened yet at this point in the log.</p>;
+    return (
+      <p className="empty">
+        {replaying
+          ? "Nothing had happened yet at this point in the log."
+          : "This run has not reached its first step."}
+      </p>
+    );
   }
   const shares = costShare(steps);
 

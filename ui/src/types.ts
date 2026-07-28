@@ -6,7 +6,7 @@
  * which is exactly when someone should look.
  */
 
-export type RunStatus = "running" | "suspended" | "completed" | "failed";
+export type RunStatus = "running" | "suspended" | "completed" | "failed" | "stuck";
 export type StepKind = "activity" | "llm" | "timer" | "signal" | "child";
 export type StepStatus = "running" | "waiting" | "completed" | "failed";
 

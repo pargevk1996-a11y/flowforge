@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from flowforge.core.budget import CostEntry
 from flowforge.core.children import ParentRef
+from flowforge.core.errors import RunNotFoundError
 from flowforge.core.events import TERMINAL_EVENTS, Event, EventType
 
 
@@ -32,6 +33,13 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     SUSPENDED = "suspended"
+    STUCK = "stuck"
+    """The last drive attempt raised in workflow code rather than in an activity.
+
+    Not a terminal state: nothing was compensated and nothing was lost. A bug in
+    a workflow function is a bug in *code*, so the answer is to deploy a fix and
+    drive the run again — replay picks it up exactly where it stopped, because
+    the parking event carries no command and is inert on the way through."""
 
 
 class StepKind(StrEnum):
@@ -125,6 +133,16 @@ class Timeline(BaseModel):
     """Set when this is a view of a prefix of the log rather than all of it."""
 
 
+def parked_event(events: Sequence[Event]) -> Event | None:
+    """The trailing :attr:`~EventType.WORKFLOW_TASK_FAILED`, if the run is parked.
+
+    Trailing specifically: once anything else lands — a timer fires, a child
+    reports, a signal arrives — the run has new input and deserves another
+    attempt, so it is no longer parked on the old failure."""
+    last = events[-1] if events else None
+    return last if last is not None and last.type is EventType.WORKFLOW_TASK_FAILED else None
+
+
 def terminal_event(events: Sequence[Event]) -> Event | None:
     """The run's terminal event, wherever it sits in the log.
 
@@ -142,6 +160,8 @@ def derive_status(events: Sequence[Event]) -> RunStatus:
             if terminal.type == EventType.WORKFLOW_COMPLETED
             else RunStatus.FAILED
         )
+    if parked_event(events) is not None:
+        return RunStatus.STUCK
     if any(step.kind in _WAITING_KINDS for step in _open_steps(events)):
         return RunStatus.SUSPENDED
     return RunStatus.RUNNING
@@ -216,10 +236,11 @@ def build_timeline(
 ) -> Timeline:
     """Project a run's log (or a prefix of it) into the debugger's read model."""
     if not events:
-        raise KeyError(run_id)
+        raise RunNotFoundError(run_id)
 
     started = events[0]
     terminal = terminal_event(events)
+    parked = parked_event(events)
     steps = build_steps(events, costs)
     return Timeline(
         run_id=run_id,
@@ -237,11 +258,7 @@ def build_timeline(
         ],
         parent=_parent_payload(started),
         result=terminal.payload.get("result") if terminal is not None else None,
-        error=(
-            str(terminal.payload.get("error"))
-            if terminal is not None and terminal.type == EventType.WORKFLOW_FAILED
-            else None
-        ),
+        error=_run_error(terminal, parked),
         usd_cost=round(sum(step.usd_cost for step in steps), 6),
         event_count=len(events),
         truncated_at=truncated_at,
@@ -270,6 +287,15 @@ def _step_result(start: Event, end: Event | None) -> Any:
     for key in ("result", "data", "fire_at"):
         if key in end.payload:
             return end.payload[key]
+    return None
+
+
+def _run_error(terminal: Event | None, parked: Event | None) -> str | None:
+    """Why the run is not going anywhere — whether it failed or is parked."""
+    if terminal is not None and terminal.type == EventType.WORKFLOW_FAILED:
+        return str(terminal.payload.get("error"))
+    if parked is not None:
+        return str(parked.payload.get("error"))
     return None
 
 

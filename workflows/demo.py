@@ -19,6 +19,7 @@ from typing import Any
 
 from flowforge import Budget, InMemoryCostLedger, InMemoryEventStore, InMemoryTimerStore, Registry
 from flowforge.api.controlplane import ControlPlane, build_control_plane
+from flowforge.config import Settings
 from flowforge.llm import (
     InMemoryRateLimiter,
     LLMMessage,
@@ -96,12 +97,19 @@ class CannedLLMClient:
         )
 
 
-def build_demo_control_plane() -> ControlPlane:
-    """Everything in memory: start it, poke it, restart it, nothing persists."""
+def build_demo_control_plane(settings: Settings | None = None) -> ControlPlane:
+    """Everything in memory: start it, poke it, restart it, nothing persists.
+
+    Reads ``TENANT_BUDGET_USD_PER_DAY`` and ``LLM_RATE_LIMIT_PER_SECOND`` from the
+    environment, so the knobs ``.env.example`` advertises actually do something
+    here — a documented setting that nothing reads is worse than no setting."""
+    settings = settings or Settings.from_env()
     registry = Registry()
     client = CannedLLMClient()
     pricing = Pricing({DEMO_MODEL: ModelPrice(input_per_1k=0.15, output_per_1k=0.6)})
-    limiter = InMemoryRateLimiter(default=RateLimit(per_second=20, burst=20))
+    limiter = InMemoryRateLimiter(
+        default=settings.rate_limit() or RateLimit(per_second=20, burst=20)
+    )
 
     build_invoice_to_payment(
         registry,
@@ -124,7 +132,7 @@ def build_demo_control_plane() -> ControlPlane:
         registry,
         timers=InMemoryTimerStore(),
         ledger=InMemoryCostLedger(),
-        budget=Budget(limit_usd=25.0),
+        budget=settings.default_budget() or Budget(limit_usd=25.0),
     )
     register_invoice_triggers(cp.triggers)
     return cp

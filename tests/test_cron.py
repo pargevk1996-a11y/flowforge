@@ -8,6 +8,7 @@ scheduler that was down catches up on the ticks it missed, and catching up twice
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -16,7 +17,12 @@ from pydantic import BaseModel
 from flowforge import InMemoryEventStore, Registry, WorkflowContext
 from flowforge.api import build_control_plane
 from flowforge.api.controlplane import ControlPlane
-from flowforge.triggers import CronSchedule, CronScheduler, cron_trigger
+from flowforge.triggers import (
+    CronSchedule,
+    CronScheduler,
+    InMemoryCronStateStore,
+    cron_trigger,
+)
 
 
 def _at(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> datetime:
@@ -209,6 +215,40 @@ async def test_two_schedulers_fire_each_tick_once() -> None:
     assert len(started) == 2  # 11:00 and 12:00
     assert len({d.run_id for d in deliveries}) == 2  # the duplicates point at them
     assert fired == [_at(2026, 3, 1, hour, 0).isoformat() for hour in (11, 12)]
+
+
+async def test_the_in_memory_cursor_never_moves_backwards() -> None:
+    """Same contract as the Postgres store: a lagging scheduler must not rewind
+    the fleet into ticks a peer has already dispatched."""
+    state = InMemoryCronStateStore()
+    noon = _at(2026, 3, 1, 12, 0)
+    await state.set_last_fired("sweep", noon)
+    await state.set_last_fired("sweep", noon - timedelta(hours=3))
+    assert await state.last_fired("sweep") == noon
+    await state.set_last_fired("sweep", noon + timedelta(hours=1))
+    assert await state.last_fired("sweep") == noon + timedelta(hours=1)
+
+
+async def test_one_broken_trigger_does_not_stop_the_other_schedules() -> None:
+    """A mapper that throws must not take the whole scheduler down with it."""
+    clock = _Clock(_at(2026, 3, 1, 10, 30))
+    cp, scheduler, fired = _plane(clock)
+    cp.triggers.add(
+        cron_trigger("broken", "sweep", "* * * * *", map=lambda event: {"nope": event["missing"]})
+    )
+    await scheduler.tick()  # arm both
+
+    clock.advance(timedelta(hours=1))
+    stop = asyncio.Event()
+    task = asyncio.create_task(scheduler.run_forever(interval=0.01, stop=stop))
+    await asyncio.sleep(0.15)
+    alive = not task.done()
+    stop.set()
+    task.cancel()
+    await _drain(cp)
+
+    assert alive, "the scheduler died on the broken trigger"
+    assert fired, "the healthy schedule kept firing"
 
 
 async def test_a_cron_trigger_without_a_schedule_is_rejected() -> None:

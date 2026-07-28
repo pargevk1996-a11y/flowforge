@@ -33,6 +33,7 @@ class EventType(StrEnum):
     CHILD_COMPLETED = "child_completed"
     CHILD_FAILED = "child_failed"
     COMPENSATION_COMPLETED = "compensation_completed"
+    WORKFLOW_TASK_FAILED = "workflow_task_failed"
     WORKFLOW_COMPLETED = "workflow_completed"
     WORKFLOW_FAILED = "workflow_failed"
 

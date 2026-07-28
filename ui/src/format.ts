@@ -24,14 +24,20 @@ export function formatCost(usd: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
+/**
+ * Times are rendered in UTC and say so. A debugger is read next to server logs,
+ * and an unmarked timestamp that turns out to be in another timezone costs more
+ * than the four pixels the "Z" takes up.
+ */
 export function formatTime(iso: string): string {
   const at = new Date(iso);
-  return Number.isNaN(at.getTime()) ? iso : at.toISOString().slice(11, 23);
+  return Number.isNaN(at.getTime()) ? iso : `${at.toISOString().slice(11, 23)}Z`;
 }
 
 export function formatDate(iso: string): string {
   const at = new Date(iso);
-  return Number.isNaN(at.getTime()) ? iso : at.toISOString().replace("T", " ").slice(0, 19);
+  if (Number.isNaN(at.getTime())) return iso;
+  return `${at.toISOString().replace("T", " ").slice(0, 19)}Z`;
 }
 
 export function relativeTime(iso: string, now: number = Date.now()): string {

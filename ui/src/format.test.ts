@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { costShare, formatCost, formatDuration, pendingSteps, relativeTime, sortSteps, summarise, truncate } from "./format";
+import {
+  costShare,
+  formatCost,
+  formatDate,
+  formatDuration,
+  formatTime,
+  pendingSteps,
+  relativeTime,
+  sortSteps,
+  summarise,
+  truncate,
+} from "./format";
 import type { Step, Timeline } from "./types";
 
 function step(overrides: Partial<Step> = {}): Step {
@@ -38,6 +49,18 @@ describe("formatCost", () => {
     expect(formatCost(0)).toBe("$0");
     expect(formatCost(0.0002)).toBe("$0.0002");
     expect(formatCost(1.5)).toBe("$1.50");
+  });
+});
+
+describe("formatDate / formatTime", () => {
+  it("marks the timezone, because a debugger is read next to server logs", () => {
+    expect(formatDate("2026-03-01T10:00:00Z")).toBe("2026-03-01 10:00:00Z");
+    expect(formatTime("2026-03-01T10:00:00.123Z")).toBe("10:00:00.123Z");
+  });
+
+  it("passes unparseable values through rather than printing Invalid Date", () => {
+    expect(formatDate("not a date")).toBe("not a date");
+    expect(formatTime("not a date")).toBe("not a date");
   });
 });
 

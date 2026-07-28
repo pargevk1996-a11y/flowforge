@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "../api";
 import { formatCost, formatDate, formatDuration, pendingSteps, summarise } from "../format";
@@ -30,21 +30,35 @@ export function RunDetail({ runId, onOpen, onClose }: Props) {
   const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Bumped whenever the view moves to another run, so a response that was
+  // already in flight for the previous one cannot land on top of this one.
+  const generation = useRef(0);
+
   // The full timeline is always fetched: it is what the scrubber's range is
   // measured against, and what "go live" returns to.
   const loadLive = useCallback(async () => {
+    const mine = generation.current;
     try {
       const timeline = await api.timeline(runId);
+      if (generation.current !== mine) return null;
       setLive(timeline);
       setError(null);
       return timeline;
     } catch (cause) {
+      if (generation.current !== mine) return null;
       setError(cause instanceof Error ? cause.message : String(cause));
       return null;
     }
   }, [runId]);
 
   useEffect(() => {
+    // Clear the previous run's data, not just the controls: keeping it would
+    // render one run's steps under another run's id until the fetch returns —
+    // exactly what happens when following a child link out of a fan-out.
+    generation.current += 1;
+    setLive(null);
+    setView(null);
+    setError(null);
     setAt(null);
     setSelected(null);
     setTree(null);
@@ -65,12 +79,17 @@ export function RunDetail({ runId, onOpen, onClose }: Props) {
       return;
     }
     let cancelled = false;
+    const mine = generation.current;
     void api
       .timeline(runId, at)
-      .then((timeline) => !cancelled && setView(timeline))
-      .catch((cause: unknown) =>
-        setError(cause instanceof Error ? cause.message : String(cause)),
-      );
+      .then((timeline) => {
+        if (!cancelled && generation.current === mine) setView(timeline);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled && generation.current === mine) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -78,7 +97,11 @@ export function RunDetail({ runId, onOpen, onClose }: Props) {
 
   useEffect(() => {
     if (tab !== "tree" || tree !== null) return;
-    void api.tree(runId).then(setTree).catch(() => setTree(null));
+    const mine = generation.current;
+    void api
+      .tree(runId)
+      .then((node) => generation.current === mine && setTree(node))
+      .catch(() => undefined);
   }, [tab, tree, runId]);
 
   if (error !== null && live === null) {
@@ -122,6 +145,12 @@ export function RunDetail({ runId, onOpen, onClose }: Props) {
           Waiting on {waiting.map((step) => `${step.name} (${step.kind})`).join(", ")}.
         </p>
       )}
+      {view.status === "stuck" && (
+        <p className="note">
+          The last attempt broke in workflow code, so the run is parked: nothing was
+          rolled back. Fix the code and drive it again — replay resumes from here.
+        </p>
+      )}
       {view.error !== null && <pre className="error-text banner">{view.error}</pre>}
       {view.parent !== null && (
         <p className="note">
@@ -158,6 +187,7 @@ export function RunDetail({ runId, onOpen, onClose }: Props) {
         <StepTable
           onOpenChild={onOpen}
           onSelect={setSelected}
+          replaying={view.truncated_at !== null}
           selected={selected}
           steps={view.steps}
           triage={triage}

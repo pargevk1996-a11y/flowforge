@@ -33,6 +33,7 @@ from pydantic import BaseModel, TypeAdapter
 from flowforge.api.controlplane import ControlPlane
 from flowforge.core.errors import (
     BudgetExceededError,
+    RunNotFoundError,
     TriggerNotFoundError,
     WorkflowNotFoundError,
 )
@@ -122,7 +123,7 @@ def create_app(
     async def get_run(run_id: str) -> dict[str, Any]:
         try:
             info = await cp.engine.describe(run_id)
-        except KeyError as exc:
+        except RunNotFoundError as exc:
             raise HTTPException(404, f"unknown run {run_id!r}") from exc
         return {
             "run_id": run_id,

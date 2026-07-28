@@ -68,11 +68,16 @@ over activities, LLM steps or **child runs** with a bound that survives a restar
 A React/Vite **replay debugger** scrubs any run back through its own log. All green
 under `mypy --strict` and `tsc --strict`.
 
+The suite skips what it cannot reach, so run it against throwaway infrastructure
+to execute every test rather than most of them:
+
 ```bash
-# Run the Postgres integration tests against a throwaway database:
-docker run -d --name ff-pg -e POSTGRES_USER=flowforge -e POSTGRES_PASSWORD=flowforge \
-  -e POSTGRES_DB=flowforge -p 5432:5432 postgres:16
-DATABASE_URL=postgresql://flowforge:flowforge@localhost:5432/flowforge pytest
+docker run -d --rm --name ff-pg -e POSTGRES_USER=flowforge \
+  -e POSTGRES_PASSWORD=flowforge -e POSTGRES_DB=flowforge -p 5432:5432 postgres:16
+docker run -d --rm --name ff-redis -p 6379:6379 redis:7-alpine
+
+DATABASE_URL=postgresql://flowforge:flowforge@localhost:5432/flowforge \
+REDIS_URL=redis://localhost:6379/0 pytest        # 170 tests, no skips
 ```
 
 ```bash
@@ -87,7 +92,30 @@ no database, no queue — so the whole engine is explorable from one command.
 
 The tests in `tests/test_engine.py` are the executable spec for the properties
 above (idempotency across replay, resume after a simulated `kill -9`,
-suspend→resume via timer and via signal, retry, reverse-order compensation).
+suspend→resume via timer and via signal, retry, reverse-order compensation), and
+`tests/test_resilience.py` is the spec for the failure boundaries below.
+
+### Three kinds of failure, three answers
+
+Conflating these is how durable engines lose data or lose availability:
+
+| What broke | What happens |
+|---|---|
+| An activity exhausted its retries | **Business failure** — the run fails and its saga compensates |
+| The workflow function itself raised | **Parked** (`stuck`) — the error is recorded, *nothing is rolled back*, and the run resumes from where it stopped once the code is fixed |
+| The store is unreachable | **Infrastructure** — the run goes back on the queue and the worker backs off |
+
+Compensating a payment because of a `KeyError` destroys more than it saves, so a
+bug in workflow code never triggers a rollback. Resuming is safe because the
+parking event carries no command: replay walks straight past it and picks up at
+the next unfinished step, repeating no side effect. An unregistered workflow and a
+run seeded before its input schema changed park for the same reason.
+
+And no single run's failure may take down the loop that processes the others: the
+worker, timer wheel and cron scheduler run through one supervisor that logs a
+failed iteration, backs off and carries on — a detached task that dies on its
+first exception dies *silently*, and one malformed cron mapper must not stop every
+other schedule in the process.
 
 ### Roadmap
 
@@ -103,6 +131,8 @@ suspend→resume via timer and via signal, retry, reverse-order compensation).
 | Triggers — HTTP/webhook, inbound email, cron — with exactly-once delivery claims | ✅ done |
 | Sub-workflows, fan-out/fan-in with bounded concurrency + **contract-review** reference workflow | ✅ done |
 | React/Vite timeline & **replay debugger** UI (`flowforge api --demo`) | ✅ done |
+| OpenTelemetry tracing — one span tree per run, across workers | 🔜 next |
+| A sweeper for runs whose parent notice was lost between append and enqueue | 🔜 |
 
 ---
 
@@ -114,7 +144,7 @@ A thin FastAPI surface over the engine. Runs are enqueued and driven by a worker
 | Method & path | Purpose |
 |---|---|
 | `POST /runs` | start a run: `{workflow, input, priority?, tenant?}` → `{run_id}` |
-| `GET /runs/{id}` | status: `running` / `suspended` / `completed` / `failed` (+ result/error) |
+| `GET /runs/{id}` | status: `running` / `suspended` / `completed` / `failed` / `stuck` (+ result/error) |
 | `GET /runs/{id}/timeline` | the run folded into **steps** + the raw log; `?at=N` replays it to that point |
 | `POST /runs/{id}/signals` | deliver a signal, e.g. the CFO approval that wakes a suspended run |
 | `GET /tenants/{tenant}/spend` | spend in the current window, the limit, and what is left |
@@ -143,7 +173,8 @@ A run's log is the truth, but it is a stream of low-level facts — *scheduled*,
 this LLM call, this approval; what it returned, how long it took, what it cost.
 
 - **Run list** — filter by status, tenant or workflow; refreshes itself, because
-  a worker finishes a run while you are looking at it.
+  a worker finishes a run while you are looking at it. `stuck` runs are the ones
+  waiting on a code fix.
 - **Steps** — one row per command, with the LLM calls marked and a cost bar, so
   the one clause out of forty that spent real money is visible at a glance.
   Failures-first ordering for triage; expand a row for its payloads.
@@ -292,7 +323,9 @@ cp = build_control_plane(
 ```
 
 Configure the defaults with `TENANT_BUDGET_USD_PER_DAY` and
-`LLM_RATE_LIMIT_PER_SECOND` (see `.env.example`). A ledger with no budget is pure
+`LLM_RATE_LIMIT_PER_SECOND` (see `.env.example`); `flowforge api --demo` reads
+both, and a rate of zero is refused at start-up rather than dividing by zero on
+the first call. A ledger with no budget is pure
 accounting: it records everything and enforces nothing.
 
 `tests/test_budget.py` is the executable spec — billing to the right tenant, no
@@ -364,10 +397,19 @@ gone. `tests/test_contract_review.py` drives it over the real HTTP surface.
 ## Tech stack
 
 Python 3.12 · `mypy --strict` · Pydantic v2 · PostgreSQL 16 + asyncpg · Redis ·
-FastAPI · instructor (structured LLM output) · OpenTelemetry · React + Vite.
+FastAPI · React 19 + Vite + TypeScript (`tsc --strict`).
+
+Structured LLM output is done here rather than delegated: the schema goes into the
+prompt, the response is validated against the Pydantic model, and a violation is
+fed back as a correction — so there is no `instructor` dependency to explain. The
+provider SDKs live behind the `llm` extra and one 40-line `LLMClient` protocol;
+nothing in the engine imports them.
 
 No LangChain / CrewAI. No Temporal SDK — this is a purpose-built analogue,
 specialised for LLM steps. No Celery — too weak for durable execution.
+
+**Not wired yet:** OpenTelemetry. The `otel` extra and the `OTEL_*` settings are
+placeholders — there is no tracing in the engine today (see the roadmap).
 
 ## License
 

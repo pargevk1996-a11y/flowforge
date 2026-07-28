@@ -141,15 +141,16 @@ async def test_a_claim_whose_run_never_started_is_completed_by_the_retry() -> No
     assert handled == [Order(sku="A-1")]
 
 
-async def test_unmappable_event_is_rejected_without_claiming_it() -> None:
+async def test_a_corrected_retry_can_still_use_a_claimed_key() -> None:
+    """The claim is taken before the mapping is attempted, so a bad payload does
+    leave a claim behind. What matters is that it does not become a tombstone:
+    the sender's corrected retry still gets to start its run."""
     cp, _handled = _plane()
     bad = {"order_id": "ord-11"}  # no sku
 
     with pytest.raises(KeyError):
         await cp.dispatcher.fire("order_placed", bad)
 
-    # The key was claimed by the failed attempt, so the sender's retry reuses it —
-    # and a *well-formed* retry under the same id still gets to start its run.
     good = await cp.dispatcher.fire("order_placed", {"sku": "A-1", "order_id": "ord-11"})
     assert good.started
 

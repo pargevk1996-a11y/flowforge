@@ -223,6 +223,9 @@ async def test_map_compensations_unwind_in_item_order() -> None:
 
 
 async def test_map_rejects_a_meaningless_bound() -> None:
+    """A nonsensical bound is a bug in workflow code: the run parks, it does not
+    take the worker down with it."""
+
     async def work(item: str) -> str:
         return item
 
@@ -231,10 +234,11 @@ async def test_map_rejects_a_meaningless_bound() -> None:
 
     reg = Registry()
     definition = reg.add(wf)
-    with pytest.raises(ValueError, match="concurrency"):
-        await Engine(InMemoryEventStore(), reg).start(
-            "r1", definition, Doc(paragraphs=["a"])
-        )
+    res = await Engine(InMemoryEventStore(), reg).start(
+        "r1", definition, Doc(paragraphs=["a"])
+    )
+    assert res.status is RunStatus.STUCK
+    assert res.error is not None and "concurrency" in res.error
 
 
 async def test_map_of_an_empty_list_does_nothing() -> None:

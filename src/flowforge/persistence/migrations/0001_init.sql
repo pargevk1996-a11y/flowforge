@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     run_id        TEXT PRIMARY KEY,
     workflow_name TEXT        NOT NULL,
     tenant_id     TEXT        NOT NULL DEFAULT 'default',
-    status        TEXT        NOT NULL DEFAULT 'running',  -- running|suspended|completed|failed
+    status        TEXT        NOT NULL DEFAULT 'running',  -- running|suspended|stuck|completed|failed
     version       INTEGER     NOT NULL DEFAULT 0,          -- == length of the event log
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()

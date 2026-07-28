@@ -107,6 +107,17 @@ async def test_request_larger_than_the_bucket_is_rejected_immediately() -> None:
     assert time.waits == []  # rejected outright, never waited on
 
 
+@pytest.mark.parametrize(
+    ("per_second", "burst"),
+    [(0, None), (-1, None), (1, 0), (1, -2)],
+)
+def test_a_limit_that_is_not_a_rate_is_rejected(per_second: float, burst: float | None) -> None:
+    """A zero rate is a bucket that never refills, not the absence of a limit —
+    it used to divide by zero on the first wait."""
+    with pytest.raises(ValueError):
+        RateLimit(per_second=per_second, burst=burst)
+
+
 async def test_llm_step_paces_its_schema_retries() -> None:
     # The retry loop is the fastest way to hammer a provider, so it is limited too.
     client = ScriptedLLMClient(['{"vendor": 17}', json.dumps({"vendor": "Acme"})])

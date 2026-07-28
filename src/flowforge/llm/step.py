@@ -68,6 +68,9 @@ class LLMStep[TOutput: BaseModel]:
         self.name = name or f"llm:{output_type.__name__}"
 
     async def run(self, user_content: str, /, *, meter: CostMeter | None = None) -> TOutput:
+        # Before anything is spent: a model nobody can price cannot be billed,
+        # and a call that cannot be billed must not be made under a budget.
+        self.pricing.ensure_priced(self.model)
         schema = self.output_type.model_json_schema()
         messages: list[LLMMessage] = []
         if self.system is not None:

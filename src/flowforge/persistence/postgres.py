@@ -31,6 +31,12 @@ _SUSPENDING = frozenset(
     {EventType.TIMER_STARTED, EventType.WAIT_STARTED, EventType.CHILD_STARTED}
 )
 
+_RUN_FILTERS = (
+    "WHERE ($1::text IS NULL OR status = $1) "
+    "  AND ($2::text IS NULL OR tenant_id = $2) "
+    "  AND ($3::text IS NULL OR workflow_name = $3)"
+)
+
 
 def _status_for(last: Event) -> str:
     """The status to project onto the run row from the event just appended.
@@ -43,6 +49,8 @@ def _status_for(last: Event) -> str:
         return "completed"
     if last.type == EventType.WORKFLOW_FAILED:
         return "failed"
+    if last.type == EventType.WORKFLOW_TASK_FAILED:
+        return "stuck"
     if last.type in _SUSPENDING:
         return "suspended"
     return "running"
@@ -144,20 +152,26 @@ class PostgresEventStore:
         tenant: str | None = None,
         workflow: str | None = None,
     ) -> RunPage:
-        rows = await self._pool.fetch(
-            "SELECT run_id, workflow_name, tenant_id, status, version, created_at, "
-            "       updated_at, COUNT(*) OVER() AS total "
-            "FROM workflow_runs "
-            "WHERE ($1::text IS NULL OR status = $1) "
-            "  AND ($2::text IS NULL OR tenant_id = $2) "
-            "  AND ($3::text IS NULL OR workflow_name = $3) "
-            "ORDER BY created_at DESC, run_id DESC LIMIT $4 OFFSET $5",
-            status,
-            tenant,
-            workflow,
-            limit,
-            offset,
-        )
+        # Counted separately, not with COUNT(*) OVER(): a window function has no
+        # rows to count once the offset runs past the last one, so a page beyond
+        # the end would report a total of zero and strand whoever is paging.
+        async with self._pool.acquire() as conn:
+            total = await conn.fetchval(
+                "SELECT count(*) FROM workflow_runs " + _RUN_FILTERS,
+                status,
+                tenant,
+                workflow,
+            )
+            rows = await conn.fetch(
+                "SELECT run_id, workflow_name, tenant_id, status, version, created_at, "
+                "       updated_at FROM workflow_runs " + _RUN_FILTERS +
+                " ORDER BY created_at DESC, run_id DESC LIMIT $4 OFFSET $5",
+                status,
+                tenant,
+                workflow,
+                limit,
+                offset,
+            )
         return RunPage(
             runs=[
                 RunSummary(
@@ -171,7 +185,7 @@ class PostgresEventStore:
                 )
                 for row in rows
             ],
-            total=int(rows[0]["total"]) if rows else 0,
+            total=int(total or 0),
             limit=limit,
             offset=offset,
         )

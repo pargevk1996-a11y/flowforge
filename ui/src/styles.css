@@ -141,6 +141,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .pill-failed { color: var(--bad); }
 .pill-running { color: var(--accent); }
 .pill-suspended, .pill-waiting { color: var(--warn); }
+.pill-stuck { color: var(--bad); border-style: dashed; }
 
 .glyph { display: inline-block; width: 18px; color: var(--muted); }
 .glyph-llm { color: var(--accent); }

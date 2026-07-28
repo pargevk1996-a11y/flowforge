@@ -14,6 +14,7 @@ other respect, which is why fan-out needs no scheduler of its own.
 
 from __future__ import annotations
 
+import logging
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -22,13 +23,20 @@ from pydantic import TypeAdapter
 
 from flowforge.core.budget import BudgetGuard
 from flowforge.core.children import ChildOutcome, ParentRef
-from flowforge.core.errors import ActivityFailedError, ConcurrencyError, Suspended
+from flowforge.core.errors import (
+    ActivityFailedError,
+    ConcurrencyError,
+    RunNotFoundError,
+    Suspended,
+)
 from flowforge.core.event_store import EventStore
 from flowforge.core.events import Event, EventType
-from flowforge.core.timeline import RunStatus, derive_status, terminal_event
+from flowforge.core.timeline import RunStatus, derive_status, parked_event, terminal_event
 from flowforge.core.timers import TimerStore
 from flowforge.workflow.context import DEFAULT_TENANT, Clock, WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # the queue package imports the engine, so keep the edge one-way
     from flowforge.queue.base import TaskQueue
@@ -97,18 +105,23 @@ class Engine:
         return await self.drive(run_id)
 
     async def drive(self, run_id: str) -> RunResult:
+        """Advance a run by one attempt.
+
+        Three ways this ends badly, and they are not the same thing:
+        an activity that exhausted its retries is a *business* failure — the run
+        fails and compensates; a bug in the workflow function itself is a failure
+        of *code* — the run is parked (:attr:`RunStatus.STUCK`) with the error
+        recorded and nothing rolled back, because compensating a payment over a
+        ``KeyError`` destroys more than it saves; and a store that cannot be
+        reached is neither, so it propagates to the caller to retry."""
         history = await self._store.load(run_id)
         if not history:
-            raise ValueError(f"run {run_id!r} does not exist")
+            raise RunNotFoundError(f"run {run_id!r} does not exist")
 
         terminal = terminal_event(history)
         if terminal is not None:
             return self._terminal_result(terminal)
 
-        wf = self._registry.get(history[0].name or "")
-        workflow_input = TypeAdapter(wf.input_type).validate_python(
-            history[0].payload["input"]
-        )
         ctx = WorkflowContext(
             run_id,
             history,
@@ -120,6 +133,13 @@ class Engine:
         )
 
         try:
+            # Resolution and input validation sit inside the guard on purpose:
+            # an unregistered workflow and a run seeded before its input schema
+            # changed are both "deploy a fix and drive it again", not crashes.
+            wf = self._registry.get(history[0].name or "")
+            workflow_input = TypeAdapter(wf.input_type).validate_python(
+                history[0].payload["input"]
+            )
             result = await wf.fn(ctx, workflow_input)
         except Suspended:
             return RunResult(RunStatus.SUSPENDED)
@@ -128,11 +148,31 @@ class Engine:
             await ctx._append(EventType.WORKFLOW_FAILED, payload={"error": str(exc)})
             await self._notify_parent(history[0], run_id, error=str(exc))
             return RunResult(RunStatus.FAILED, error=str(exc))
+        except ConcurrencyError:
+            # Another writer advanced this run underneath us — a race, not a bug.
+            # Parking it would strand a healthy run; reload and drive it again.
+            raise
+        except Exception as exc:
+            return await self._park(ctx, exc)
 
         payload = TypeAdapter(wf.output_type).dump_python(result, mode="json")
         await ctx._append(EventType.WORKFLOW_COMPLETED, payload={"result": payload})
         await self._notify_parent(history[0], run_id, result=payload)
         return RunResult(RunStatus.COMPLETED, result=result)
+
+    async def _park(self, ctx: WorkflowContext, exc: Exception) -> RunResult:
+        """Record that a drive attempt broke on workflow code, and stop.
+
+        The event carries no ``command_seq``, so replay walks straight past it:
+        parking annotates the log without becoming part of the run's state. Fix
+        the code, drive the run again, and it continues from where it was."""
+        message = f"{type(exc).__name__}: {exc}"
+        logger.exception("run %s is stuck: %s", ctx.run_id, message)
+        await ctx._append(
+            EventType.WORKFLOW_TASK_FAILED,
+            payload={"error": message, "type": type(exc).__name__},
+        )
+        return RunResult(RunStatus.STUCK, error=message)
 
     async def fire_timer(self, run_id: str) -> RunResult:
         """Deliver the oldest pending timer, then advance the run."""
@@ -179,10 +219,13 @@ class Engine:
         """Report a run's current status from the log, without driving it."""
         history = await self._store.load(run_id)
         if not history:
-            raise KeyError(run_id)
+            raise RunNotFoundError(run_id)
         terminal = terminal_event(history)
         if terminal is not None:
             return self._terminal_result(terminal)
+        parked = parked_event(history)
+        if parked is not None:
+            return RunResult(RunStatus.STUCK, error=str(parked.payload.get("error")))
         return RunResult(derive_status(history))
 
     # -- child workflows (the ChildLauncher protocol) ------------------------

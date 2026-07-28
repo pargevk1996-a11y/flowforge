@@ -40,6 +40,15 @@ class RateLimit:
     per_second: float
     burst: float | None = None
 
+    def __post_init__(self) -> None:
+        # A zero rate is not "no limit", it is a bucket that never refills: it
+        # would divide by zero on the first wait. A negative one would sleep
+        # backwards. Neither is a limit anyone meant to configure.
+        if self.per_second <= 0:
+            raise ValueError(f"rate limit must be positive, got {self.per_second}")
+        if self.burst is not None and self.burst <= 0:
+            raise ValueError(f"burst must be positive, got {self.burst}")
+
     @property
     def capacity(self) -> float:
         # One second of sustained rate is the default burst, but never less than a

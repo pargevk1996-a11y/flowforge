@@ -146,6 +146,66 @@ async def test_child_fan_out_is_durable_across_engines() -> None:
         await store.close()
 
 
+async def test_a_page_past_the_end_still_reports_the_true_total() -> None:
+    """``COUNT(*) OVER()`` had nothing to count once the offset ran past the last
+    row, so paging off the end used to report a total of zero."""
+    store = await _store()
+    try:
+        tenant = f"pager-{uuid.uuid4().hex[:8]}"
+        reg = Registry()
+
+        async def wf(ctx: WorkflowContext, inp: Money) -> Receipt:
+            return Receipt(txn=str(inp.amount))
+
+        definition = reg.add(wf, name=f"pager_{uuid.uuid4().hex[:8]}")
+        engine = Engine(store, reg)
+        for n in range(3):
+            await engine.start(uuid.uuid4().hex, definition, Money(amount=n), tenant=tenant)
+
+        first = await store.list_runs(tenant=tenant, limit=2, offset=0)
+        past_end = await store.list_runs(tenant=tenant, limit=2, offset=10)
+
+        assert (len(first.runs), first.total) == (2, 3)
+        assert (len(past_end.runs), past_end.total) == (0, 3)
+    finally:
+        await store.close()
+
+
+async def test_a_parked_run_is_visible_as_stuck_in_the_run_row() -> None:
+    """The run row is what a list view reads, so the projection has to know about
+    parking too — otherwise a stuck run hides among the running ones."""
+    store = await _store()
+    try:
+        tenant = f"stuck-{uuid.uuid4().hex[:8]}"
+        reg = Registry()
+
+        async def buggy(ctx: WorkflowContext, inp: Money) -> Receipt:
+            return Receipt(txn=str(1 // inp.amount))  # amount=0 -> ZeroDivisionError
+
+        definition = reg.add(buggy, name=f"buggy_{uuid.uuid4().hex[:8]}")
+        run_id = uuid.uuid4().hex
+        engine = Engine(store, reg)
+
+        res = await engine.start(run_id, definition, Money(amount=0), tenant=tenant)
+        assert res.status is RunStatus.STUCK
+
+        page = await store.list_runs(tenant=tenant, status="stuck")
+        assert [run.run_id for run in page.runs] == [run_id]
+        assert (await engine.describe(run_id)).status is RunStatus.STUCK
+
+        # And it is genuinely resumable: the same log, a workflow that works.
+        fixed = Registry()
+
+        async def works(ctx: WorkflowContext, inp: Money) -> Receipt:
+            return Receipt(txn="fixed")
+
+        fixed.add(works, name=definition.name)
+        assert (await Engine(store, fixed).drive(run_id)).status is RunStatus.COMPLETED
+        assert (await store.list_runs(tenant=tenant, status="stuck")).total == 0
+    finally:
+        await store.close()
+
+
 async def test_optimistic_concurrency_rejects_stale_writer() -> None:
     store = await _store()
     try:
