@@ -29,6 +29,7 @@ from flowforge.llm import (
     Pricing,
     RateLimit,
 )
+from flowforge.otel import configure_tracing
 from workflows.contract_review import ContractServices, build_contract_review
 from workflows.invoice_to_payment import (
     InvoiceServices,
@@ -100,9 +101,10 @@ class CannedLLMClient:
 def build_demo_control_plane(settings: Settings | None = None) -> ControlPlane:
     """Everything in memory: start it, poke it, restart it, nothing persists.
 
-    Reads ``TENANT_BUDGET_USD_PER_DAY`` and ``LLM_RATE_LIMIT_PER_SECOND`` from the
-    environment, so the knobs ``.env.example`` advertises actually do something
-    here — a documented setting that nothing reads is worse than no setting."""
+    Reads ``TENANT_BUDGET_USD_PER_DAY``, ``LLM_RATE_LIMIT_PER_SECOND`` and
+    ``OTEL_EXPORTER_OTLP_ENDPOINT`` from the environment, so the knobs
+    ``.env.example`` advertises actually do something here — a documented setting
+    that nothing reads is worse than no setting."""
     settings = settings or Settings.from_env()
     registry = Registry()
     client = CannedLLMClient()
@@ -133,6 +135,7 @@ def build_demo_control_plane(settings: Settings | None = None) -> ControlPlane:
         timers=InMemoryTimerStore(),
         ledger=InMemoryCostLedger(),
         budget=settings.default_budget() or Budget(limit_usd=25.0),
+        tracer=configure_tracing(settings),
     )
     register_invoice_triggers(cp.triggers)
     return cp

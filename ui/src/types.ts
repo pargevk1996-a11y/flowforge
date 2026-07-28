@@ -72,6 +72,7 @@ export interface Timeline {
   error: string | null;
   usd_cost: number;
   event_count: number;
+  trace_id: string | null;
   truncated_at: number | null;
   events: RunEvent[];
 }

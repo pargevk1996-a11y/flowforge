@@ -136,6 +136,14 @@ export function RunDetail({ runId, onOpen, onClose }: Props) {
         <div><dt>steps</dt><dd>{totals.steps}</dd></div>
         <div><dt>llm calls</dt><dd>{totals.llmCalls}</dd></div>
         <div><dt>cost</dt><dd>{formatCost(totals.usd)}</dd></div>
+        {view.trace_id !== null && (
+          <div>
+            <dt>trace</dt>
+            <dd className="mono clip" title={view.trace_id}>
+              {view.trace_id.slice(0, 16)}…
+            </dd>
+          </div>
+        )}
       </dl>
 
       <Scrubber at={at} onChange={setAt} total={live.event_count} />

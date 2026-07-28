@@ -14,9 +14,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        # serve too: mypy checks the API, and without fastapi's real types every
-        # route decorator reads as untyped and --strict rejects the file.
-        run: pip install -e ".[dev,serve]"
+        # serve: mypy checks the API, and without fastapi's real types every route
+        # decorator reads as untyped and --strict rejects the file. otel: the
+        # tracing tests assert against real SDK spans, and skip without it.
+        run: pip install -e ".[dev,serve,otel]"
       - name: Lint
         run: ruff check src tests workflows
       - name: Typecheck

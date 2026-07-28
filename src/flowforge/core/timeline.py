@@ -26,6 +26,7 @@ from flowforge.core.budget import CostEntry
 from flowforge.core.children import ParentRef
 from flowforge.core.errors import RunNotFoundError
 from flowforge.core.events import TERMINAL_EVENTS, Event, EventType
+from flowforge.core.tracing import trace_id_of
 
 
 class RunStatus(StrEnum):
@@ -129,6 +130,9 @@ class Timeline(BaseModel):
     error: str | None = None
     usd_cost: float = 0.0
     event_count: int = 0
+    trace_id: str | None = None
+    """The trace this run belongs to, for jumping straight to it in a viewer."""
+
     truncated_at: int | None = None
     """Set when this is a view of a prefix of the log rather than all of it."""
 
@@ -261,6 +265,7 @@ def build_timeline(
         error=_run_error(terminal, parked),
         usd_cost=round(sum(step.usd_cost for step in steps), 6),
         event_count=len(events),
+        trace_id=trace_id_of(started.payload.get("traceparent")),
         truncated_at=truncated_at,
     )
 

@@ -36,6 +36,7 @@ from flowforge.core.timeline import (
     build_timeline,
 )
 from flowforge.core.timers import DueTimer, InMemoryTimerStore, TimerStore
+from flowforge.core.tracing import NO_TRACING, NoOpTracer, Span, Tracer
 from flowforge.queue import (
     InMemoryLockManager,
     InMemoryTaskQueue,
@@ -50,6 +51,7 @@ from flowforge.workflow.context import WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef, define
 
 __all__ = [
+    "NO_TRACING",
     "ActivityFailedError",
     "Budget",
     "BudgetExceededError",
@@ -71,6 +73,7 @@ __all__ = [
     "InMemoryTaskQueue",
     "InMemoryTimerStore",
     "LockManager",
+    "NoOpTracer",
     "NonRetryableError",
     "ParentRef",
     "QueueItem",
@@ -81,6 +84,7 @@ __all__ = [
     "RunNotFoundError",
     "RunResult",
     "RunStatus",
+    "Span",
     "Step",
     "StepKind",
     "StepStatus",
@@ -89,6 +93,7 @@ __all__ = [
     "Timeline",
     "TimerStore",
     "TimerWheel",
+    "Tracer",
     "Worker",
     "WorkflowContext",
     "WorkflowDef",

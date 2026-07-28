@@ -148,6 +148,7 @@ describe("summarise", () => {
     error: null,
     usd_cost: 0.03,
     event_count: 9,
+    trace_id: null,
     truncated_at: null,
     events: [],
   };

@@ -38,6 +38,7 @@ from flowforge.core.event_store import EventStore
 from flowforge.core.events import Event, EventType, utcnow
 from flowforge.core.retry import RetryPolicy
 from flowforge.core.timers import TimerStore
+from flowforge.core.tracing import NO_TRACING, Tracer
 
 if TYPE_CHECKING:  # definition.py imports this module, so keep the edge one-way
     from flowforge.workflow.definition import WorkflowDef
@@ -84,6 +85,7 @@ class WorkflowContext:
         timers: TimerStore | None = None,
         budget: BudgetGuard | None = None,
         children: ChildLauncher | None = None,
+        tracer: Tracer = NO_TRACING,
     ) -> None:
         self.run_id = run_id
         self.tenant = _tenant_of(history)
@@ -91,6 +93,7 @@ class WorkflowContext:
         self._timers = timers
         self._budget = budget
         self._children = children
+        self._tracer = tracer
         # Fan-out means several commands append at once; the log is single-writer,
         # so serialise the read-modify-write of the version here rather than let
         # concurrent branches collide on it.
@@ -168,10 +171,22 @@ class WorkflowContext:
 
         # The kind is recorded, not inferred: a timeline that cannot tell a model
         # call from an ordinary step cannot show what a run spent its money on.
-        await self._append(
-            EventType.ACTIVITY_SCHEDULED, command_seq=cs, name=label, payload={"kind": kind}
-        )
-        return await self._execute(fn, args, cs, label, retry or RetryPolicy(), compensate, adapter)
+        # Spans cover execution only. A replayed command did no work on this
+        # drive, and emitting a span for it would fill the trace with copies of
+        # everything the run has ever done, once per attempt.
+        with self._tracer.span(
+            f"{kind} {label}",
+            attributes={"flowforge.command_seq": cs, "flowforge.step.kind": kind},
+        ):
+            await self._append(
+                EventType.ACTIVITY_SCHEDULED,
+                command_seq=cs,
+                name=label,
+                payload={"kind": kind},
+            )
+            return await self._execute(
+                fn, args, cs, label, retry or RetryPolicy(), compensate, adapter
+            )
 
     async def llm[TOutput](
         self,
@@ -455,15 +470,21 @@ class WorkflowContext:
         for index, cs in unstarted:
             if in_flight >= concurrency:
                 break
-            child_run_id = await self._children.start_child(
-                ParentRef(self.run_id, cs), wf, inputs[index], tenant=self.tenant
-            )
-            await self._append(
-                EventType.CHILD_STARTED,
-                command_seq=cs,
-                name=f"{label}[{index}]",
-                payload={"child_run_id": child_run_id, "workflow": wf.name},
-            )
+            with self._tracer.span(
+                f"child {label}[{index}]",
+                attributes={"flowforge.command_seq": cs, "flowforge.child.workflow": wf.name},
+            ):
+                # Inside the span, so the child's own root anchor parents onto this
+                # command: a thousand-way fan-out stays one trace.
+                child_run_id = await self._children.start_child(
+                    ParentRef(self.run_id, cs), wf, inputs[index], tenant=self.tenant
+                )
+                await self._append(
+                    EventType.CHILD_STARTED,
+                    command_seq=cs,
+                    name=f"{label}[{index}]",
+                    payload={"child_run_id": child_run_id, "workflow": wf.name},
+                )
             in_flight += 1
         raise Suspended(f"children:{label}:{self.run_id}")
 

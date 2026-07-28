@@ -34,6 +34,7 @@ llm = [
 otel = [
     "opentelemetry-api>=1.29",
     "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
 ]
 dev = [
     "mypy>=1.13",
@@ -65,7 +66,7 @@ mypy_path = "src"
 files = ["src", "tests", "workflows"]
 
 [[tool.mypy.overrides]]
-module = ["redis.*", "asyncpg.*", "uvicorn.*"]
+module = ["redis.*", "asyncpg.*", "uvicorn.*", "opentelemetry.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

@@ -27,9 +27,10 @@ from pydantic import TypeAdapter
 from flowforge.core.budget import BudgetGuard
 from flowforge.core.engine import Engine
 from flowforge.core.errors import ConcurrencyError, RunNotFoundError
+from flowforge.core.tracing import NO_TRACING, Tracer
 from flowforge.queue.base import TaskQueue
 from flowforge.queue.worker import submit
-from flowforge.triggers.base import Event, TriggerRegistry
+from flowforge.triggers.base import Event, Trigger, TriggerRegistry
 from flowforge.triggers.deliveries import DeliveryStore
 from flowforge.workflow.definition import Registry
 
@@ -53,6 +54,7 @@ class TriggerDispatcher:
         *,
         deliveries: DeliveryStore | None = None,
         budget: BudgetGuard | None = None,
+        tracer: Tracer = NO_TRACING,
     ) -> None:
         self._engine = engine
         self._queue = queue
@@ -60,6 +62,7 @@ class TriggerDispatcher:
         self._triggers = triggers
         self._deliveries = deliveries
         self._budget = budget
+        self._tracer = tracer
 
     async def fire(self, name: str, event: Event, *, key: str | None = None) -> Delivery:
         """Deliver ``event`` to the trigger ``name``.
@@ -68,6 +71,21 @@ class TriggerDispatcher:
         knows a better identity than the body does (a provider's delivery id from
         a header, a cron tick's timestamp)."""
         trigger = self._triggers.get(name)
+        with self._tracer.span(
+            f"trigger {name}",
+            attributes={
+                "flowforge.trigger.kind": str(trigger.kind),
+                "flowforge.workflow": trigger.workflow,
+            },
+        ) as span:
+            delivery = await self._deliver_to(trigger, name, event, key)
+            span.set_attribute("flowforge.delivery.started", delivery.started)
+            span.set_attribute("flowforge.run_id", delivery.run_id)
+            return delivery
+
+    async def _deliver_to(
+        self, trigger: Trigger, name: str, event: Event, key: str | None
+    ) -> Delivery:
         wf = self._workflows.get(trigger.workflow)
 
         if self._budget is not None:

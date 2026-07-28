@@ -65,8 +65,9 @@ run against a real database. Every LLM call is billed to its tenant in a durable
 per-provider rate limit. Runs start from **triggers** — webhook, inbound email, or
 cron — with exactly-once delivery claims over at-least-once sources, and fan out
 over activities, LLM steps or **child runs** with a bound that survives a restart.
-A React/Vite **replay debugger** scrubs any run back through its own log. All green
-under `mypy --strict` and `tsc --strict`.
+A React/Vite **replay debugger** scrubs any run back through its own log, and
+**OpenTelemetry tracing** gives each run a single span tree that survives the
+process that started it. All green under `mypy --strict` and `tsc --strict`.
 
 The suite skips what it cannot reach, so run it against throwaway infrastructure
 to execute every test rather than most of them:
@@ -131,8 +132,8 @@ other schedule in the process.
 | Triggers — HTTP/webhook, inbound email, cron — with exactly-once delivery claims | ✅ done |
 | Sub-workflows, fan-out/fan-in with bounded concurrency + **contract-review** reference workflow | ✅ done |
 | React/Vite timeline & **replay debugger** UI (`flowforge api --demo`) | ✅ done |
-| OpenTelemetry tracing — one span tree per run, across workers | 🔜 next |
-| A sweeper for runs whose parent notice was lost between append and enqueue | 🔜 |
+| OpenTelemetry tracing — one span tree per run, across workers and restarts | ✅ done |
+| A sweeper for runs whose parent notice was lost between append and enqueue | 🔜 next |
 
 ---
 
@@ -159,6 +160,49 @@ already exhausted.
 The end-to-end tests in `tests/test_invoice_api.py` drive the real HTTP surface
 through auto-pay under the threshold, human approval above it, rejection, and saga
 rollback when a downstream step fails.
+
+---
+
+## Tracing
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 flowforge api --demo
+```
+
+A run is not a call stack. It is driven, suspends, and is driven again — minutes
+or days later, on a different worker — and it branches into child runs driven
+elsewhere again. Instrument each drive on its own and you get a hundred
+disconnected traces of the same invoice.
+
+So the trace context travels the only way anything travels here: **in the event
+log**. The run's root span context is written into `WORKFLOW_STARTED` as a W3C
+`traceparent`, and every later drive, in whatever process, starts its span against
+that recorded parent:
+
+```
+run invoice_to_payment                     ← anchor, written into the log
+├── drive invoice_to_payment               ← worker A, 09:00
+│   ├── activity ocr_pdf
+│   ├── llm extract_invoice
+│   └── outcome=suspended, waiting_on=signal:cfo_approval:3
+└── drive invoice_to_payment               ← worker B, 14:32, after the approval
+    ├── activity create_payment
+    └── outcome=completed
+```
+
+A fan-out stays one tree too: each child command is a span, and the child run's
+own anchor is created *inside* it, so a forty-way fan-out is forty subtrees of one
+trace rather than forty traces.
+
+Three deliberate choices. The root span is opened and closed immediately — it is
+an anchor, not a measurement, because no other process can close a span this one
+opened. Replayed commands get no span: a drive re-walks everything the run has
+ever done, and spanning that would fill the trace with copies. And a suspension is
+*not* an error on the span — it is the engine working as designed — while a
+compensated failure and a parked run both are.
+
+`tests/test_tracing.py` asserts against spans collected from the real SDK, so what
+is tested is what an exporter would ship.
 
 ---
 
@@ -408,8 +452,8 @@ nothing in the engine imports them.
 No LangChain / CrewAI. No Temporal SDK — this is a purpose-built analogue,
 specialised for LLM steps. No Celery — too weak for durable execution.
 
-**Not wired yet:** OpenTelemetry. The `otel` extra and the `OTEL_*` settings are
-placeholders — there is no tracing in the engine today (see the roadmap).
+OpenTelemetry lives behind the `otel` extra and a five-method protocol; without it
+the engine's tracer is a `nullcontext` and costs nothing.
 
 ## License
 

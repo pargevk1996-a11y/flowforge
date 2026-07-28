@@ -33,6 +33,7 @@ from flowforge.core.event_store import EventStore
 from flowforge.core.events import Event, EventType
 from flowforge.core.timeline import RunStatus, derive_status, parked_event, terminal_event
 from flowforge.core.timers import TimerStore
+from flowforge.core.tracing import NO_TRACING, Tracer
 from flowforge.workflow.context import DEFAULT_TENANT, Clock, WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef
 
@@ -58,6 +59,7 @@ class Engine:
         timers: TimerStore | None = None,
         budget: BudgetGuard | None = None,
         queue: TaskQueue | None = None,
+        tracer: Tracer = NO_TRACING,
     ) -> None:
         self._store = store
         self._registry = registry
@@ -65,6 +67,7 @@ class Engine:
         self._timers = timers
         self._budget = budget
         self._queue = queue
+        self._tracer = tracer
 
     async def create_run(
         self,
@@ -80,7 +83,9 @@ class Engine:
 
         The tenant is written into the first event because it decides who is
         billed for the run's LLM calls — it must survive a crash and be identical
-        on every replay, which only the log guarantees."""
+        on every replay, which only the log guarantees. The trace context is
+        written for the same reason: it is the anchor every later drive, in
+        whatever process, hangs its span from."""
         wf = self.resolve(workflow)
         payload: dict[str, Any] = {
             "input": TypeAdapter(wf.input_type).dump_python(workflow_input, mode="json"),
@@ -88,8 +93,21 @@ class Engine:
         }
         if parent is not None:
             payload["parent"] = parent.as_payload()
-        started = Event(seq=0, type=EventType.WORKFLOW_STARTED, name=wf.name, payload=payload)
-        await self._store.append(run_id, [started], expected_version=0)
+
+        # The root span is opened and closed here because no other process can
+        # close it — a run may outlive this one by days. It is an anchor for the
+        # trace, not a measurement of the run's duration.
+        with self._tracer.span(
+            f"run {wf.name}",
+            attributes={"flowforge.run_id": run_id, "flowforge.tenant": tenant},
+        ):
+            traceparent = self._tracer.traceparent()
+            if traceparent is not None:
+                payload["traceparent"] = traceparent
+            started = Event(
+                seq=0, type=EventType.WORKFLOW_STARTED, name=wf.name, payload=payload
+            )
+            await self._store.append(run_id, [started], expected_version=0)
         return wf
 
     async def start(
@@ -130,35 +148,51 @@ class Engine:
             timers=self._timers,
             budget=self._budget,
             children=self,
+            tracer=self._tracer,
         )
 
-        try:
-            # Resolution and input validation sit inside the guard on purpose:
-            # an unregistered workflow and a run seeded before its input schema
-            # changed are both "deploy a fix and drive it again", not crashes.
-            wf = self._registry.get(history[0].name or "")
-            workflow_input = TypeAdapter(wf.input_type).validate_python(
-                history[0].payload["input"]
-            )
-            result = await wf.fn(ctx, workflow_input)
-        except Suspended:
-            return RunResult(RunStatus.SUSPENDED)
-        except ActivityFailedError as exc:
-            await ctx._run_compensations()
-            await ctx._append(EventType.WORKFLOW_FAILED, payload={"error": str(exc)})
-            await self._notify_parent(history[0], run_id, error=str(exc))
-            return RunResult(RunStatus.FAILED, error=str(exc))
-        except ConcurrencyError:
-            # Another writer advanced this run underneath us — a race, not a bug.
-            # Parking it would strand a healthy run; reload and drive it again.
-            raise
-        except Exception as exc:
-            return await self._park(ctx, exc)
+        # The span wraps the guard, not the other way round: suspension is normal
+        # control flow, and a span that saw an exception escape is a span that
+        # reads as broken.
+        with self._tracer.span(
+            f"drive {history[0].name or '?'}",
+            parent=_traceparent_of(history[0]),
+            attributes={"flowforge.run_id": run_id, "flowforge.tenant": ctx.tenant},
+        ) as span:
+            try:
+                # Resolution and input validation sit inside the guard on purpose:
+                # an unregistered workflow and a run seeded before its input schema
+                # changed are both "deploy a fix and drive it again", not crashes.
+                wf = self._registry.get(history[0].name or "")
+                workflow_input = TypeAdapter(wf.input_type).validate_python(
+                    history[0].payload["input"]
+                )
+                result = await wf.fn(ctx, workflow_input)
+            except Suspended as suspended:
+                span.set_attribute("flowforge.outcome", "suspended")
+                span.set_attribute("flowforge.waiting_on", suspended.reason)
+                return RunResult(RunStatus.SUSPENDED)
+            except ActivityFailedError as exc:
+                await ctx._run_compensations()
+                await ctx._append(EventType.WORKFLOW_FAILED, payload={"error": str(exc)})
+                await self._notify_parent(history[0], run_id, error=str(exc))
+                span.set_attribute("flowforge.outcome", "failed")
+                span.record_error(exc)
+                return RunResult(RunStatus.FAILED, error=str(exc))
+            except ConcurrencyError:
+                # Another writer advanced this run underneath us — a race, not a
+                # bug. Parking it would strand a healthy run; reload and retry.
+                raise
+            except Exception as exc:
+                span.set_attribute("flowforge.outcome", "stuck")
+                span.record_error(exc)
+                return await self._park(ctx, exc)
 
-        payload = TypeAdapter(wf.output_type).dump_python(result, mode="json")
-        await ctx._append(EventType.WORKFLOW_COMPLETED, payload={"result": payload})
-        await self._notify_parent(history[0], run_id, result=payload)
-        return RunResult(RunStatus.COMPLETED, result=result)
+            payload = TypeAdapter(wf.output_type).dump_python(result, mode="json")
+            await ctx._append(EventType.WORKFLOW_COMPLETED, payload={"result": payload})
+            await self._notify_parent(history[0], run_id, result=payload)
+            span.set_attribute("flowforge.outcome", "completed")
+            return RunResult(RunStatus.COMPLETED, result=result)
 
     async def _park(self, ctx: WorkflowContext, exc: Exception) -> RunResult:
         """Record that a drive attempt broke on workflow code, and stop.
@@ -347,6 +381,12 @@ class Engine:
         if event.type == EventType.WORKFLOW_COMPLETED:
             return RunResult(RunStatus.COMPLETED, result=event.payload.get("result"))
         return RunResult(RunStatus.FAILED, error=event.payload.get("error"))
+
+
+def _traceparent_of(started: Event) -> str | None:
+    """The trace anchor recorded when the run was seeded, if it was."""
+    traceparent = started.payload.get("traceparent")
+    return str(traceparent) if traceparent else None
 
 
 def _pending_command(

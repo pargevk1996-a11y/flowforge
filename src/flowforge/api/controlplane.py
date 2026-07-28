@@ -10,6 +10,7 @@ from flowforge.core.budget import Budget, BudgetGuard, CostLedger
 from flowforge.core.engine import Engine
 from flowforge.core.event_store import EventStore
 from flowforge.core.timers import TimerStore
+from flowforge.core.tracing import NO_TRACING, Tracer
 from flowforge.queue.base import LockManager, TaskQueue
 from flowforge.queue.memory import InMemoryLockManager, InMemoryTaskQueue
 from flowforge.queue.worker import Worker
@@ -49,6 +50,7 @@ def build_control_plane(
     triggers: TriggerRegistry | None = None,
     deliveries: DeliveryStore | None = None,
     cron_state: CronStateStore | None = None,
+    tracer: Tracer = NO_TRACING,
 ) -> ControlPlane:
     """Wire the runtime. A ``ledger`` turns on cost accounting; a ``budget`` (or
     ``tenant_budgets``) additionally turns on enforcement.
@@ -64,7 +66,7 @@ def build_control_plane(
         if ledger is not None
         else None
     )
-    engine = Engine(store, registry, timers=timers, budget=guard, queue=queue)
+    engine = Engine(store, registry, timers=timers, budget=guard, queue=queue, tracer=tracer)
     worker = Worker(engine, queue, locks)
     wheel = TimerWheel(engine, timers, queue) if timers is not None else None
     dispatcher = TriggerDispatcher(
@@ -74,6 +76,7 @@ def build_control_plane(
         triggers,
         deliveries=deliveries or InMemoryDeliveryStore(),
         budget=guard,
+        tracer=tracer,
     )
     return ControlPlane(
         engine=engine,

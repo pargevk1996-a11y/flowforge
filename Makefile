@@ -12,8 +12,8 @@ help: ## Show this help
 venv: ## Create the virtualenv
 	python3.12 -m venv $(VENV)
 
-install: venv ## Install the package with dev + serve extras
-	$(PIP) install -e ".[dev,serve]"
+install: venv ## Install the package with dev + serve + otel extras
+	$(PIP) install -e ".[dev,serve,otel]"
 
 lint: ## Run ruff
 	$(VENV)/bin/ruff check src tests workflows
