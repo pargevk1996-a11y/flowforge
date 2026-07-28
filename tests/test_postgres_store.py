@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import os
 import uuid
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
 from flowforge import (
+    ChildSweeper,
     ConcurrencyError,
     Engine,
     InMemoryLockManager,
@@ -202,6 +204,51 @@ async def test_a_parked_run_is_visible_as_stuck_in_the_run_row() -> None:
         fixed.add(works, name=definition.name)
         assert (await Engine(store, fixed).drive(run_id)).status is RunStatus.COMPLETED
         assert (await store.list_runs(tenant=tenant, status="stuck")).total == 0
+    finally:
+        await store.close()
+
+
+async def test_the_sweeper_finds_a_stranded_parent_in_the_database() -> None:
+    """The suspended-run query goes out as a ``RunStatus``, which is a StrEnum —
+    a driver either takes that or it does not, and only a real one can say."""
+
+    class Silent(Engine):
+        """A child that commits its result and dies before reporting back."""
+
+        async def _notify_parent(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    store = await _store()
+    try:
+        child_name = f"kid_{uuid.uuid4().hex[:8]}"
+        parent_name = f"parent_{uuid.uuid4().hex[:8]}"
+
+        async def kid(ctx: WorkflowContext, inp: Money) -> Receipt:
+            return Receipt(txn=f"x{inp.amount}")
+
+        async def parent(ctx: WorkflowContext, inp: Money) -> Receipt:
+            results: list[Receipt] = await ctx.children(child_name, [Money(amount=3)])
+            return results[0]
+
+        reg = Registry()
+        reg.add(kid, name=child_name)
+        reg.add(parent, name=parent_name)
+
+        run_id = uuid.uuid4().hex
+        queue = InMemoryTaskQueue()
+        engine = Engine(store, reg, queue=queue)
+        assert (
+            await engine.start(run_id, parent_name, Money(amount=0))
+        ).status is RunStatus.SUSPENDED
+
+        await Silent(store, reg, queue=InMemoryTaskQueue()).drive(
+            engine.child_run_id(run_id, 0)
+        )
+        while await queue.dequeue() is not None:
+            pass  # nothing will drive the parent now
+
+        assert await ChildSweeper(engine, store, queue).sweep() == [run_id]
+        assert (await engine.drive(run_id)).status is RunStatus.COMPLETED
     finally:
         await store.close()
 

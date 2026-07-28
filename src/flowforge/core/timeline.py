@@ -231,6 +231,18 @@ def build_steps(
     return steps
 
 
+def pending_children(events: Sequence[Event]) -> list[Step]:
+    """Child commands this run started and has not heard back from.
+
+    Reuses the projection rather than re-reading the log: an unfinished child is
+    exactly an open step of kind ``child``."""
+    return [
+        step
+        for step in build_steps(events)
+        if step.kind is StepKind.CHILD and step.status is StepStatus.WAITING
+    ]
+
+
 def build_timeline(
     run_id: str,
     events: Sequence[Event],

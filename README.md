@@ -67,7 +67,8 @@ cron — with exactly-once delivery claims over at-least-once sources, and fan o
 over activities, LLM steps or **child runs** with a bound that survives a restart.
 A React/Vite **replay debugger** scrubs any run back through its own log, and
 **OpenTelemetry tracing** gives each run a single span tree that survives the
-process that started it. All green under `mypy --strict` and `tsc --strict`.
+process that started it. A sweeper reaps parents whose children died before
+reporting back. All green under `mypy --strict` and `tsc --strict`.
 
 The suite skips what it cannot reach, so run it against throwaway infrastructure
 to execute every test rather than most of them:
@@ -78,7 +79,7 @@ docker run -d --rm --name ff-pg -e POSTGRES_USER=flowforge \
 docker run -d --rm --name ff-redis -p 6379:6379 redis:7-alpine
 
 DATABASE_URL=postgresql://flowforge:flowforge@localhost:5432/flowforge \
-REDIS_URL=redis://localhost:6379/0 pytest        # 170 tests, no skips
+REDIS_URL=redis://localhost:6379/0 pytest        # 196 tests, no skips
 ```
 
 ```bash
@@ -133,7 +134,7 @@ other schedule in the process.
 | Sub-workflows, fan-out/fan-in with bounded concurrency + **contract-review** reference workflow | ✅ done |
 | React/Vite timeline & **replay debugger** UI (`flowforge api --demo`) | ✅ done |
 | OpenTelemetry tracing — one span tree per run, across workers and restarts | ✅ done |
-| A sweeper for runs whose parent notice was lost between append and enqueue | 🔜 next |
+| A sweeper for parents whose children finished without reporting back | ✅ done |
 
 ---
 
@@ -272,11 +273,20 @@ is how a fan-out loses money — and then the earliest failure, by item order, i
 raised. Compensations unwind in item order too, not in finish order.
 
 **Sub-workflows are real runs.** `ctx.child(workflow, input)` seeds an independent
-run and suspends the parent; the child reports back into the parent's log when it
-terminates and re-queues it. Child ids are derived (`{parent}.{command_seq}`), so
+run and suspends the parent; the child wakes the parent and writes the outcome into
+its log when it terminates. Child ids are derived (`{parent}.{command_seq}`), so
 replaying a parent recognises the child it already started instead of starting a
-second one, and a child that dies between finishing and reporting is reconciled —
-the parent asks the child's own log rather than waiting forever.
+second one.
+
+Reporting back is two steps, and **the wake-up comes first on purpose**: a crash
+between them leaves the parent queued without the result, which the next drive
+re-reads from the child's own log. Losing the news is survivable; losing the nudge
+is not. The window that ordering cannot close — a child that commits its result and
+then dies before reporting at all — is what `ChildSweeper` is for: it scans
+suspended runs, asks whether a child they wait on has already terminated, and
+re-queues the ones that have. It repairs nothing itself; restoring the nudge is
+enough, because the drive reconciles the outcome. It is a scan, deliberately: this
+covers a crash window, not a hot path.
 
 That is what makes the bound on `ctx.children` *durable*: a thousand-item fan-out
 never has a thousand runs in flight, and the pacing is recomputed from the log on

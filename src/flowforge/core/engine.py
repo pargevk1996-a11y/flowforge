@@ -318,14 +318,21 @@ class Engine:
         result: Any = None,
         error: str | None = None,
     ) -> None:
-        """Report a finished child into its parent's log and wake the parent.
+        """Wake a finished child's parent, and report the outcome into its log.
 
-        Best-effort by design: if the parent has already terminated, or another
-        writer is mid-append, the notice is dropped — the parent reconciles from
-        the child's own log the next time it runs, so nothing is lost, only
-        delayed. The one gap left is a crash between this append and the enqueue
-        below, which leaves the parent holding the result but not queued to act
-        on it; a sweeper for stranded parents is the next brick."""
+        **Waking comes first, on purpose.** A crash between the two used to leave
+        the parent holding a result nobody would ever act on; this way a crash
+        leaves it queued without the result, and the drive that follows
+        reconciles from the child's own log — a state the parent already knows how
+        to recover from. Losing the *notice* is survivable; losing the *nudge* is
+        not.
+
+        Still best-effort: a terminated parent is left alone, and a racing writer
+        makes the append collide, which is fine because the parent is already
+        queued and will read the child's log itself. The window this cannot cover
+        is a child that dies after committing its own result and before getting
+        here at all — that is what :class:`~flowforge.sweeper.ChildSweeper` is
+        for."""
         parent = ParentRef.from_payload(started.payload.get("parent"))
         if parent is None:
             return
@@ -339,6 +346,9 @@ class Engine:
         ):
             return
 
+        if self._queue is not None:
+            await self._queue.enqueue(parent.run_id)
+
         completed = error is None
         event = Event(
             seq=len(history),
@@ -351,12 +361,8 @@ class Engine:
                 else {"child_run_id": child_run_id, "error": error}
             ),
         )
-        try:
+        with suppress(ConcurrencyError):
             await self._store.append(parent.run_id, [event], expected_version=len(history))
-        except ConcurrencyError:
-            return
-        if self._queue is not None:
-            await self._queue.enqueue(parent.run_id)
 
     async def _deliver(
         self,

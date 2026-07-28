@@ -46,6 +46,7 @@ from flowforge.queue import (
     Worker,
     submit,
 )
+from flowforge.sweeper import ChildSweeper
 from flowforge.wheel import TimerWheel
 from flowforge.workflow.context import WorkflowContext
 from flowforge.workflow.definition import Registry, WorkflowDef, define
@@ -59,6 +60,7 @@ __all__ = [
     "ChildFailedError",
     "ChildLauncher",
     "ChildOutcome",
+    "ChildSweeper",
     "ConcurrencyError",
     "CostEntry",
     "CostLedger",

@@ -14,6 +14,7 @@ from flowforge.core.tracing import NO_TRACING, Tracer
 from flowforge.queue.base import LockManager, TaskQueue
 from flowforge.queue.memory import InMemoryLockManager, InMemoryTaskQueue
 from flowforge.queue.worker import Worker
+from flowforge.sweeper import ChildSweeper
 from flowforge.triggers.base import TriggerRegistry
 from flowforge.triggers.cron import CronScheduler, CronStateStore
 from flowforge.triggers.deliveries import DeliveryStore, InMemoryDeliveryStore
@@ -32,6 +33,7 @@ class ControlPlane:
     triggers: TriggerRegistry
     dispatcher: TriggerDispatcher
     cron: CronScheduler
+    sweeper: ChildSweeper
     wheel: TimerWheel | None = None
     budget: BudgetGuard | None = None
     ledger: CostLedger | None = None
@@ -87,6 +89,7 @@ def build_control_plane(
         triggers=triggers,
         dispatcher=dispatcher,
         cron=CronScheduler(dispatcher, triggers, cron_state),
+        sweeper=ChildSweeper(engine, store, queue),
         wheel=wheel,
         budget=guard,
         ledger=ledger,

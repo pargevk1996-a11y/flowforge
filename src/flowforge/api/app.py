@@ -3,8 +3,8 @@
 Thin HTTP surface over the engine: start a run, inspect its status, read its full
 event timeline, deliver a signal (e.g. a human approval), read a tenant's spend,
 and receive external events on a trigger. Runs are enqueued for a worker to drive;
-with ``run_background=True`` the app runs its own worker, timer-wheel and cron
-loops, so the whole thing is live behind ``flowforge api``.
+with ``run_background=True`` the app runs its own worker, timer-wheel, cron and
+sweeper loops, so the whole thing is live behind ``flowforge api``.
 
 ``POST /triggers/{name}`` is the door webhooks and inbound email come through. It
 is deliberately boring about retries: a redelivered event returns ``200`` with the
@@ -88,6 +88,7 @@ def create_app(
         tasks = [
             asyncio.create_task(cp.worker.run_forever(stop=stop)),
             asyncio.create_task(cp.cron.run_forever(stop=stop)),
+            asyncio.create_task(cp.sweeper.run_forever(stop=stop)),
         ]
         if cp.wheel is not None:
             tasks.append(asyncio.create_task(cp.wheel.run_forever(stop=stop)))
